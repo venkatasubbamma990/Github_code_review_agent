@@ -11,23 +11,28 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"go.uber.org/zap"
 
 	"codereviewagent/internal/errors"
 	"codereviewagent/internal/models"
 )
 
 type LLMReviewer struct {
-	apiKey     string
-	baseURL    string
-	model      string
-	httpClient *http.Client
+	apiKey      string
+	baseURL     string
+	model       string
+	useJSONMode bool
+	httpClient  *http.Client
+	log         *zap.Logger
 }
 
-func NewLLMReviewer(apiKey, baseURL, model string) *LLMReviewer {
+func NewLLMReviewer(apiKey, baseURL, model string, useJSONMode bool, log *zap.Logger) *LLMReviewer {
 	return &LLMReviewer{
-		apiKey:  apiKey,
-		baseURL: strings.TrimRight(baseURL, "/"),
-		model:   model,
+		apiKey:      apiKey,
+		baseURL:     strings.TrimRight(baseURL, "/"),
+		model:       model,
+		useJSONMode: useJSONMode,
+		log:         log.Named("reviewer"),
 		httpClient: &http.Client{
 			Timeout: 120 * time.Second,
 		},
@@ -95,6 +100,13 @@ func (r *LLMReviewer) executeReview(ctx context.Context, userPrompt, source, lan
 		return nil, errors.WithMessage(errors.ErrReviewFailed, "LLM API key is not configured")
 	}
 
+	start := time.Now()
+	r.log.Info("calling LLM for code review",
+		zap.String("model", r.model),
+		zap.String("source", source),
+		zap.String("language", language),
+	)
+
 	payload := chatRequest{
 		Model: r.model,
 		Messages: []chatMessage{
@@ -102,7 +114,9 @@ func (r *LLMReviewer) executeReview(ctx context.Context, userPrompt, source, lan
 			{Role: "user", Content: userPrompt},
 		},
 		Temperature: 0.2,
-		ResponseFormat: &responseFormat{Type: "json_object"},
+	}
+	if r.useJSONMode {
+		payload.ResponseFormat = &responseFormat{Type: "json_object"}
 	}
 
 	body, err := json.Marshal(payload)
@@ -129,6 +143,11 @@ func (r *LLMReviewer) executeReview(ctx context.Context, userPrompt, source, lan
 	}
 
 	if resp.StatusCode != http.StatusOK {
+		r.log.Error("LLM API error",
+			zap.Int("status", resp.StatusCode),
+			zap.String("source", source),
+			zap.Duration("duration", time.Since(start)),
+		)
 		return nil, errors.WithMessage(errors.ErrReviewFailed,
 			fmt.Sprintf("LLM API returned status %d: %s", resp.StatusCode, truncate(string(respBody), 500)))
 	}
@@ -146,6 +165,10 @@ func (r *LLMReviewer) executeReview(ctx context.Context, userPrompt, source, lan
 
 	var parsed llmReviewOutput
 	if err := json.Unmarshal([]byte(content), &parsed); err != nil {
+		r.log.Error("failed to parse LLM response",
+			zap.Error(err),
+			zap.String("source", source),
+		)
 		return nil, errors.WithMessage(errors.ErrReviewFailed,
 			fmt.Sprintf("failed to parse LLM review JSON: %v", err))
 	}
@@ -169,6 +192,14 @@ func (r *LLMReviewer) executeReview(ctx context.Context, userPrompt, source, lan
 	if result.Suggestions == nil {
 		result.Suggestions = []string{}
 	}
+
+	r.log.Info("LLM review completed",
+		zap.String("review_id", result.ID),
+		zap.String("source", source),
+		zap.Int("overall_score", result.Quality.Overall),
+		zap.Int("findings", len(result.Findings)),
+		zap.Duration("duration", time.Since(start)),
+	)
 	return result, nil
 }
 

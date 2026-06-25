@@ -7,11 +7,11 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"io"
-	"log"
 	"net/http"
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	"go.uber.org/zap"
 
 	"codereviewagent/internal/errors"
 	"codereviewagent/internal/models"
@@ -21,24 +21,38 @@ import (
 type ReviewHandler struct {
 	svc           *service.ReviewService
 	webhookSecret string
+	log           *zap.Logger
 }
 
-func NewReviewHandler(svc *service.ReviewService, webhookSecret string) *ReviewHandler {
-	return &ReviewHandler{svc: svc, webhookSecret: webhookSecret}
+func NewReviewHandler(svc *service.ReviewService, webhookSecret string, log *zap.Logger) *ReviewHandler {
+	return &ReviewHandler{svc: svc, webhookSecret: webhookSecret, log: log.Named("handler")}
 }
 
 func (h *ReviewHandler) ReviewCode(c *gin.Context) {
 	var req models.ReviewRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		respondError(c, errors.WithMessage(errors.ErrInvalidRequest, "invalid request body"))
+		h.log.Warn("invalid review request", zap.Error(err))
+		respondError(c, h.log, errors.WithMessage(errors.ErrInvalidRequest, "invalid request body"))
 		return
 	}
 
+	h.log.Info("code review requested",
+		zap.String("language", req.Language),
+		zap.String("file_path", req.FilePath),
+		zap.Int("code_length", len(req.Code)),
+	)
+
 	result, err := h.svc.ReviewCode(c.Request.Context(), req)
 	if err != nil {
-		handleServiceError(c, err)
+		handleServiceError(c, h.log, err)
 		return
 	}
+
+	h.log.Info("code review completed",
+		zap.String("review_id", result.ID),
+		zap.Int("overall_score", result.Quality.Overall),
+		zap.Int("findings_count", len(result.Findings)),
+	)
 
 	c.JSON(http.StatusOK, models.APIResponse[models.ReviewResult]{
 		Success: true,
@@ -49,15 +63,29 @@ func (h *ReviewHandler) ReviewCode(c *gin.Context) {
 func (h *ReviewHandler) ReviewPR(c *gin.Context) {
 	var req models.PRReviewRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		respondError(c, errors.WithMessage(errors.ErrInvalidRequest, "invalid request body"))
+		h.log.Warn("invalid PR review request", zap.Error(err))
+		respondError(c, h.log, errors.WithMessage(errors.ErrInvalidRequest, "invalid request body"))
 		return
 	}
 
+	h.log.Info("PR review requested",
+		zap.String("owner", req.Owner),
+		zap.String("repo", req.Repo),
+		zap.Int("pr", req.PR),
+	)
+
 	result, err := h.svc.ReviewPullRequest(c.Request.Context(), req.Owner, req.Repo, req.PR)
 	if err != nil {
-		handleServiceError(c, err)
+		handleServiceError(c, h.log, err)
 		return
 	}
+
+	h.log.Info("PR review completed",
+		zap.String("review_id", result.ID),
+		zap.String("repo", req.Owner+"/"+req.Repo),
+		zap.Int("pr", req.PR),
+		zap.Int("overall_score", result.Quality.Overall),
+	)
 
 	c.JSON(http.StatusOK, models.APIResponse[models.ReviewResult]{
 		Success: true,
@@ -68,32 +96,37 @@ func (h *ReviewHandler) ReviewPR(c *gin.Context) {
 func (h *ReviewHandler) GitHubWebhook(c *gin.Context) {
 	body, err := io.ReadAll(c.Request.Body)
 	if err != nil {
-		respondError(c, errors.WithMessage(errors.ErrInvalidRequest, "failed to read webhook body"))
+		h.log.Warn("failed to read webhook body", zap.Error(err))
+		respondError(c, h.log, errors.WithMessage(errors.ErrInvalidRequest, "failed to read webhook body"))
 		return
 	}
 
 	if h.webhookSecret != "" {
 		sig := c.GetHeader("X-Hub-Signature-256")
 		if !verifyGitHubSignature(body, sig, h.webhookSecret) {
-			respondError(c, errors.ErrUnauthorized)
+			h.log.Warn("webhook signature verification failed")
+			respondError(c, h.log, errors.ErrUnauthorized)
 			return
 		}
 	}
 
 	event := c.GetHeader("X-GitHub-Event")
 	if event != "pull_request" {
+		h.log.Debug("webhook event ignored", zap.String("event", event))
 		c.JSON(http.StatusOK, gin.H{"message": "event ignored"})
 		return
 	}
 
 	var payload models.GitHubWebhookPayload
 	if err := json.Unmarshal(body, &payload); err != nil {
-		respondError(c, errors.WithMessage(errors.ErrInvalidRequest, "invalid webhook payload"))
+		h.log.Warn("invalid webhook payload", zap.Error(err))
+		respondError(c, h.log, errors.WithMessage(errors.ErrInvalidRequest, "invalid webhook payload"))
 		return
 	}
 
 	action := payload.Action
 	if action != "opened" && action != "synchronize" && action != "reopened" {
+		h.log.Debug("webhook action ignored", zap.String("action", action))
 		c.JSON(http.StatusOK, gin.H{"message": "action ignored", "action": action})
 		return
 	}
@@ -105,12 +138,29 @@ func (h *ReviewHandler) GitHubWebhook(c *gin.Context) {
 		prNumber = payload.Number
 	}
 
+	h.log.Info("webhook PR review queued",
+		zap.String("action", action),
+		zap.String("repo", owner+"/"+repo),
+		zap.Int("pr", prNumber),
+	)
+
 	go func() {
 		ctx := context.Background()
-		_, reviewErr := h.svc.HandleWebhookPR(ctx, owner, repo, prNumber)
+		result, reviewErr := h.svc.HandleWebhookPR(ctx, owner, repo, prNumber)
 		if reviewErr != nil {
-			log.Printf("webhook PR review failed for %s/%s#%d: %v", owner, repo, prNumber, reviewErr)
+			h.log.Error("webhook PR review failed",
+				zap.String("repo", owner+"/"+repo),
+				zap.Int("pr", prNumber),
+				zap.Error(reviewErr),
+			)
+			return
 		}
+		h.log.Info("webhook PR review completed",
+			zap.String("review_id", result.ID),
+			zap.String("repo", owner+"/"+repo),
+			zap.Int("pr", prNumber),
+			zap.Int("overall_score", result.Quality.Overall),
+		)
 	}()
 
 	c.JSON(http.StatusAccepted, gin.H{
@@ -127,15 +177,21 @@ func (h *ReviewHandler) Health(c *gin.Context) {
 	})
 }
 
-func handleServiceError(c *gin.Context, err error) {
+func handleServiceError(c *gin.Context, log *zap.Logger, err error) {
 	if ae, ok := errors.AsAppError(err); ok {
-		respondError(c, ae)
+		if ae.HTTPStatus >= 500 {
+			log.Error("service error", zap.String("code", ae.Code), zap.Error(err))
+		} else {
+			log.Warn("service error", zap.String("code", ae.Code), zap.String("message", ae.ClientMessage()))
+		}
+		respondError(c, log, ae)
 		return
 	}
-	respondError(c, errors.WithCause(errors.ErrInternal, err))
+	log.Error("unexpected service error", zap.Error(err))
+	respondError(c, log, errors.WithCause(errors.ErrInternal, err))
 }
 
-func respondError(c *gin.Context, ae *errors.AppError) {
+func respondError(c *gin.Context, log *zap.Logger, ae *errors.AppError) {
 	c.JSON(ae.HTTPStatus, models.APIResponse[any]{
 		Success: false,
 		Error:   ae.ClientMessage(),

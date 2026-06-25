@@ -1,0 +1,8 @@
+.env
+.git
+.gitignore
+bin/
+*.md
+docker-compose.yml
+Dockerfile
+.dockerignore

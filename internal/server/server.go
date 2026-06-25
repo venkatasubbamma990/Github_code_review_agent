@@ -2,6 +2,7 @@ package server
 
 import (
 	"github.com/gin-gonic/gin"
+	"go.uber.org/zap"
 
 	"codereviewagent/internal/handler"
 	"codereviewagent/internal/middleware"
@@ -12,10 +13,10 @@ type Server struct {
 	handler *handler.ReviewHandler
 }
 
-func New(h *handler.ReviewHandler, ginMode string) *Server {
+func New(h *handler.ReviewHandler, ginMode string, log *zap.Logger) *Server {
 	gin.SetMode(ginMode)
 	engine := gin.New()
-	engine.Use(middleware.Recovery(), middleware.RequestLogger())
+	engine.Use(middleware.ZapRecovery(log), middleware.RequestLogger(log))
 
 	s := &Server{engine: engine, handler: h}
 	s.registerRoutes()

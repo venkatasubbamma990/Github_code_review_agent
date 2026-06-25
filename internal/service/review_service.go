@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 
+	"go.uber.org/zap"
+
 	"codereviewagent/internal/errors"
 	ghclient "codereviewagent/internal/github"
 	"codereviewagent/internal/models"
@@ -12,16 +14,18 @@ import (
 )
 
 type ReviewService struct {
-	reviewer      reviewer.Reviewer
-	github        *ghclient.Client
-	postComments  bool
+	reviewer     reviewer.Reviewer
+	github       *ghclient.Client
+	postComments bool
+	log          *zap.Logger
 }
 
-func NewReviewService(rev reviewer.Reviewer, gh *ghclient.Client, postComments bool) *ReviewService {
+func NewReviewService(rev reviewer.Reviewer, gh *ghclient.Client, postComments bool, log *zap.Logger) *ReviewService {
 	return &ReviewService{
 		reviewer:     rev,
 		github:       gh,
 		postComments: postComments,
+		log:          log.Named("service"),
 	}
 }
 
@@ -29,39 +33,101 @@ func (s *ReviewService) ReviewCode(ctx context.Context, req models.ReviewRequest
 	if strings.TrimSpace(req.Code) == "" {
 		return nil, errors.WithMessage(errors.ErrInvalidRequest, "code cannot be empty")
 	}
-	return s.reviewer.ReviewCode(ctx, req.Code, req.Language, req.FilePath, req.Context)
+
+	s.log.Debug("starting code review",
+		zap.String("language", req.Language),
+		zap.String("file_path", req.FilePath),
+	)
+
+	result, err := s.reviewer.ReviewCode(ctx, req.Code, req.Language, req.FilePath, req.Context)
+	if err != nil {
+		s.log.Error("code review failed",
+			zap.String("language", req.Language),
+			zap.Error(err),
+		)
+		return nil, err
+	}
+
+	s.log.Info("code review finished",
+		zap.String("review_id", result.ID),
+		zap.Int("overall_score", result.Quality.Overall),
+		zap.Int("findings", len(result.Findings)),
+	)
+	return result, nil
 }
 
 func (s *ReviewService) ReviewPullRequest(ctx context.Context, owner, repo string, prNumber int) (*models.ReviewResult, error) {
+	repoFullName := fmt.Sprintf("%s/%s", owner, repo)
+
 	if !s.github.Enabled() {
 		return nil, errors.WithMessage(errors.ErrInternal, "GitHub token is not configured")
 	}
 
+	s.log.Info("fetching PR diff", zap.String("repo", repoFullName), zap.Int("pr", prNumber))
+
 	diff, err := s.github.GetPRDiff(ctx, owner, repo, prNumber)
 	if err != nil {
+		s.log.Error("failed to fetch PR diff",
+			zap.String("repo", repoFullName),
+			zap.Int("pr", prNumber),
+			zap.Error(err),
+		)
 		return nil, err
 	}
 	if strings.TrimSpace(diff) == "" {
 		return nil, errors.WithMessage(errors.ErrInvalidRequest, "pull request has no reviewable changes")
 	}
 
-	repoFullName := fmt.Sprintf("%s/%s", owner, repo)
+	s.log.Debug("PR diff fetched",
+		zap.String("repo", repoFullName),
+		zap.Int("pr", prNumber),
+		zap.Int("diff_length", len(diff)),
+	)
+
 	result, err := s.reviewer.ReviewDiff(ctx, diff, repoFullName, prNumber)
 	if err != nil {
+		s.log.Error("PR diff review failed",
+			zap.String("repo", repoFullName),
+			zap.Int("pr", prNumber),
+			zap.Error(err),
+		)
 		return nil, err
 	}
 
 	if s.postComments {
 		comment := buildDetailedPRComment(result)
+		s.log.Info("posting review comment to PR",
+			zap.String("repo", repoFullName),
+			zap.Int("pr", prNumber),
+		)
 		if postErr := s.github.PostReviewComment(ctx, owner, repo, prNumber, comment); postErr != nil {
+			s.log.Error("failed to post PR comment",
+				zap.String("repo", repoFullName),
+				zap.Int("pr", prNumber),
+				zap.Error(postErr),
+			)
 			return result, postErr
 		}
+		s.log.Info("review comment posted",
+			zap.String("repo", repoFullName),
+			zap.Int("pr", prNumber),
+		)
 	}
 
+	s.log.Info("PR review finished",
+		zap.String("review_id", result.ID),
+		zap.String("repo", repoFullName),
+		zap.Int("pr", prNumber),
+		zap.Int("overall_score", result.Quality.Overall),
+	)
 	return result, nil
 }
 
 func (s *ReviewService) HandleWebhookPR(ctx context.Context, owner, repo string, prNumber int) (*models.ReviewResult, error) {
+	s.log.Info("processing webhook PR review",
+		zap.String("repo", owner+"/"+repo),
+		zap.Int("pr", prNumber),
+	)
 	return s.ReviewPullRequest(ctx, owner, repo, prNumber)
 }
 
