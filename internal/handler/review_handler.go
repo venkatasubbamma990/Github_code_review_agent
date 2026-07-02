@@ -14,6 +14,7 @@ import (
 	"go.uber.org/zap"
 
 	"codereviewagent/internal/errors"
+	ghclient "codereviewagent/internal/github"
 	"codereviewagent/internal/models"
 	"codereviewagent/internal/service"
 )
@@ -93,6 +94,74 @@ func (h *ReviewHandler) ReviewPR(c *gin.Context) {
 	})
 }
 
+func (h *ReviewHandler) ReviewRepo(c *gin.Context) {
+	var req models.RepoReviewRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		h.log.Warn("invalid repo review request", zap.Error(err))
+		respondError(c, h.log, errors.WithMessage(errors.ErrInvalidRequest, "invalid request body"))
+		return
+	}
+
+	owner, repo, err := ghclient.ParseRepoURL(req.URL)
+	if err != nil {
+		respondError(c, h.log, errors.WithMessage(errors.ErrInvalidRequest, err.Error()))
+		return
+	}
+
+	h.log.Info("repo review requested",
+		zap.String("url", req.URL),
+		zap.String("repo", owner+"/"+repo),
+		zap.Bool("async", req.Async),
+	)
+
+	if req.Async {
+		jobID, enqueueErr := h.svc.EnqueueRepoReview(owner, repo, req.Branch, req.MaxFiles)
+		if enqueueErr != nil {
+			handleServiceError(c, h.log, enqueueErr)
+			return
+		}
+		c.JSON(http.StatusAccepted, models.APIResponse[models.ReviewJobAccepted]{
+			Success: true,
+			Data: models.ReviewJobAccepted{
+				JobID:   jobID,
+				Message: "repository review queued",
+				Repo:    owner + "/" + repo,
+			},
+		})
+		return
+	}
+
+	result, err := h.svc.ReviewRepository(c.Request.Context(), req)
+	if err != nil {
+		handleServiceError(c, h.log, err)
+		return
+	}
+
+	c.JSON(http.StatusOK, models.APIResponse[models.ReviewResult]{
+		Success: true,
+		Data:    *result,
+	})
+}
+
+func (h *ReviewHandler) GetJobStatus(c *gin.Context) {
+	jobID := c.Param("id")
+	if jobID == "" {
+		respondError(c, h.log, errors.WithMessage(errors.ErrInvalidRequest, "job id is required"))
+		return
+	}
+
+	status, err := h.svc.GetJobStatus(jobID)
+	if err != nil {
+		handleServiceError(c, h.log, err)
+		return
+	}
+
+	c.JSON(http.StatusOK, models.APIResponse[models.JobStatusResponse]{
+		Success: true,
+		Data:    *status,
+	})
+}
+
 func (h *ReviewHandler) GitHubWebhook(c *gin.Context) {
 	body, err := io.ReadAll(c.Request.Body)
 	if err != nil {
@@ -144,6 +213,16 @@ func (h *ReviewHandler) GitHubWebhook(c *gin.Context) {
 		zap.Int("pr", prNumber),
 	)
 
+	if jobID, err := h.svc.EnqueuePRReview(owner, repo, prNumber); err == nil {
+		c.JSON(http.StatusAccepted, gin.H{
+			"message": "review queued",
+			"job_id":  jobID,
+			"pr":      prNumber,
+			"repo":    owner + "/" + repo,
+		})
+		return
+	}
+
 	go func() {
 		ctx := context.Background()
 		result, reviewErr := h.svc.HandleWebhookPR(ctx, owner, repo, prNumber)
@@ -164,7 +243,7 @@ func (h *ReviewHandler) GitHubWebhook(c *gin.Context) {
 	}()
 
 	c.JSON(http.StatusAccepted, gin.H{
-		"message": "review queued",
+		"message": "review queued (in-process)",
 		"pr":      prNumber,
 		"repo":    owner + "/" + repo,
 	})

@@ -34,6 +34,8 @@ func (s *Server) registerRoutes() {
 	{
 		api.POST("/review", s.handler.ReviewCode)
 		api.POST("/review/pr", s.handler.ReviewPR)
+		api.POST("/review/repo", s.handler.ReviewRepo)
+		api.GET("/review/jobs/:id", s.handler.GetJobStatus)
 		api.POST("/webhooks/github", s.handler.GitHubWebhook)
 	}
 }

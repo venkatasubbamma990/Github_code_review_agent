@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -10,21 +11,33 @@ import (
 	"codereviewagent/internal/errors"
 	ghclient "codereviewagent/internal/github"
 	"codereviewagent/internal/models"
+	"codereviewagent/internal/queue"
 	"codereviewagent/internal/reviewer"
 )
 
 type ReviewService struct {
 	reviewer     reviewer.Reviewer
 	github       *ghclient.Client
+	queue        *queue.Client
 	postComments bool
+	maxRepoFiles int
 	log          *zap.Logger
 }
 
-func NewReviewService(rev reviewer.Reviewer, gh *ghclient.Client, postComments bool, log *zap.Logger) *ReviewService {
+func NewReviewService(
+	rev reviewer.Reviewer,
+	gh *ghclient.Client,
+	q *queue.Client,
+	postComments bool,
+	maxRepoFiles int,
+	log *zap.Logger,
+) *ReviewService {
 	return &ReviewService{
 		reviewer:     rev,
 		github:       gh,
+		queue:        q,
 		postComments: postComments,
+		maxRepoFiles: maxRepoFiles,
 		log:          log.Named("service"),
 	}
 }
@@ -33,113 +46,137 @@ func (s *ReviewService) ReviewCode(ctx context.Context, req models.ReviewRequest
 	if strings.TrimSpace(req.Code) == "" {
 		return nil, errors.WithMessage(errors.ErrInvalidRequest, "code cannot be empty")
 	}
-
-	s.log.Debug("starting code review",
-		zap.String("language", req.Language),
-		zap.String("file_path", req.FilePath),
-	)
-
-	result, err := s.reviewer.ReviewCode(ctx, req.Code, req.Language, req.FilePath, req.Context)
-	if err != nil {
-		s.log.Error("code review failed",
-			zap.String("language", req.Language),
-			zap.Error(err),
-		)
-		return nil, err
-	}
-
-	s.log.Info("code review finished",
-		zap.String("review_id", result.ID),
-		zap.Int("overall_score", result.Quality.Overall),
-		zap.Int("findings", len(result.Findings)),
-	)
-	return result, nil
+	return s.reviewer.ReviewCode(ctx, req.Code, req.Language, req.FilePath, req.Context)
 }
 
 func (s *ReviewService) ReviewPullRequest(ctx context.Context, owner, repo string, prNumber int) (*models.ReviewResult, error) {
 	repoFullName := fmt.Sprintf("%s/%s", owner, repo)
-
 	if !s.github.Enabled() {
 		return nil, errors.WithMessage(errors.ErrInternal, "GitHub token is not configured")
 	}
 
-	s.log.Info("fetching PR diff", zap.String("repo", repoFullName), zap.Int("pr", prNumber))
-
-	diff, err := s.github.GetPRDiff(ctx, owner, repo, prNumber)
+	files, err := s.github.GetPRFileChunks(ctx, owner, repo, prNumber)
 	if err != nil {
-		s.log.Error("failed to fetch PR diff",
-			zap.String("repo", repoFullName),
-			zap.Int("pr", prNumber),
-			zap.Error(err),
-		)
 		return nil, err
 	}
-	if strings.TrimSpace(diff) == "" {
+	if len(files) == 0 {
 		return nil, errors.WithMessage(errors.ErrInvalidRequest, "pull request has no reviewable changes")
 	}
 
-	s.log.Debug("PR diff fetched",
-		zap.String("repo", repoFullName),
-		zap.Int("pr", prNumber),
-		zap.Int("diff_length", len(diff)),
-	)
-
-	result, err := s.reviewer.ReviewDiff(ctx, diff, repoFullName, prNumber)
+	result, err := s.reviewer.ReviewFiles(ctx, fmt.Sprintf("github:%s#%d", repoFullName, prNumber), repoFullName, files)
 	if err != nil {
-		s.log.Error("PR diff review failed",
-			zap.String("repo", repoFullName),
-			zap.Int("pr", prNumber),
-			zap.Error(err),
-		)
 		return nil, err
 	}
 
 	if s.postComments {
 		comment := buildDetailedPRComment(result)
-		s.log.Info("posting review comment to PR",
-			zap.String("repo", repoFullName),
-			zap.Int("pr", prNumber),
-		)
 		if postErr := s.github.PostReviewComment(ctx, owner, repo, prNumber, comment); postErr != nil {
-			s.log.Error("failed to post PR comment",
-				zap.String("repo", repoFullName),
-				zap.Int("pr", prNumber),
-				zap.Error(postErr),
-			)
 			return result, postErr
 		}
-		s.log.Info("review comment posted",
-			zap.String("repo", repoFullName),
-			zap.Int("pr", prNumber),
-		)
 	}
-
-	s.log.Info("PR review finished",
-		zap.String("review_id", result.ID),
-		zap.String("repo", repoFullName),
-		zap.Int("pr", prNumber),
-		zap.Int("overall_score", result.Quality.Overall),
-	)
 	return result, nil
 }
 
+func (s *ReviewService) ReviewRepository(ctx context.Context, req models.RepoReviewRequest) (*models.ReviewResult, error) {
+	owner, repo, err := ghclient.ParseRepoURL(req.URL)
+	if err != nil {
+		return nil, errors.WithMessage(errors.ErrInvalidRequest, err.Error())
+	}
+	if !s.github.Enabled() {
+		return nil, errors.WithMessage(errors.ErrInternal, "GitHub token is not configured")
+	}
+
+	maxFiles := req.MaxFiles
+	if maxFiles <= 0 {
+		maxFiles = s.maxRepoFiles
+	}
+
+	files, err := s.github.GetRepositoryFiles(ctx, owner, repo, req.Branch, maxFiles)
+	if err != nil {
+		return nil, err
+	}
+
+	repoFullName := owner + "/" + repo
+	source := fmt.Sprintf("repo:%s@%s", repoFullName, req.Branch)
+	if req.Branch == "" {
+		source = fmt.Sprintf("repo:%s", repoFullName)
+	}
+
+	return s.reviewer.ReviewFiles(ctx, source, repoFullName, files)
+}
+
+func (s *ReviewService) EnqueuePRReview(owner, repo string, prNumber int) (string, error) {
+	if s.queue == nil || !s.queue.Enabled() {
+		return "", errors.WithMessage(errors.ErrInternal, "async queue is not enabled (set REDIS_ADDR)")
+	}
+	return s.queue.EnqueuePRReview(owner, repo, prNumber)
+}
+
+func (s *ReviewService) EnqueueRepoReview(owner, repo, branch string, maxFiles int) (string, error) {
+	if s.queue == nil || !s.queue.Enabled() {
+		return "", errors.WithMessage(errors.ErrInternal, "async queue is not enabled (set REDIS_ADDR)")
+	}
+	return s.queue.EnqueueRepoReview(owner, repo, branch, maxFiles)
+}
+
+func (s *ReviewService) GetJobStatus(jobID string) (*models.JobStatusResponse, error) {
+	if s.queue == nil || !s.queue.Enabled() {
+		return nil, errors.WithMessage(errors.ErrInternal, "async queue is not enabled")
+	}
+	status, err := s.queue.GetJobStatus(jobID)
+	if err != nil {
+		return nil, errors.WithMessage(errors.ErrNotFound, "job not found")
+	}
+	return &models.JobStatusResponse{
+		ID:     status.ID,
+		Type:   status.Type,
+		State:  status.State,
+		Result: status.Result,
+		Error:  status.Error,
+	}, nil
+}
+
 func (s *ReviewService) HandleWebhookPR(ctx context.Context, owner, repo string, prNumber int) (*models.ReviewResult, error) {
-	s.log.Info("processing webhook PR review",
-		zap.String("repo", owner+"/"+repo),
-		zap.Int("pr", prNumber),
-	)
 	return s.ReviewPullRequest(ctx, owner, repo, prNumber)
+}
+
+func (s *ReviewService) ProcessPRReviewTask(ctx context.Context, owner, repo string, prNumber int) ([]byte, error) {
+	result, err := s.ReviewPullRequest(ctx, owner, repo, prNumber)
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(result)
+}
+
+func (s *ReviewService) ProcessRepoReviewTask(ctx context.Context, owner, repo, branch string, maxFiles int) ([]byte, error) {
+	result, err := s.ReviewRepository(ctx, models.RepoReviewRequest{
+		URL:      fmt.Sprintf("https://github.com/%s/%s", owner, repo),
+		Branch:   branch,
+		MaxFiles: maxFiles,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(result)
 }
 
 func buildDetailedPRComment(r *models.ReviewResult) string {
 	var b strings.Builder
 	b.WriteString("## 🤖 Code Review Agent Report\n\n")
 	b.WriteString(fmt.Sprintf("**Overall Quality:** %d/100\n\n", r.Quality.Overall))
-	b.WriteString(fmt.Sprintf("| Maintainability | Readability | Security | Performance |\n"))
-	b.WriteString(fmt.Sprintf("|:---:|:---:|:---:|:---:|\n"))
+	b.WriteString("| Maintainability | Readability | Security | Performance |\n")
+	b.WriteString("|:---:|:---:|:---:|:---:|\n")
 	b.WriteString(fmt.Sprintf("| %d | %d | %d | %d |\n\n",
 		r.Quality.Maintainability, r.Quality.Readability, r.Quality.Security, r.Quality.Performance))
 	b.WriteString(fmt.Sprintf("**Summary:** %s\n\n", r.Quality.Summary))
+
+	if len(r.AgentReports) > 0 {
+		b.WriteString("### Agent Scores\n\n")
+		for _, ar := range r.AgentReports {
+			b.WriteString(fmt.Sprintf("- **%s**: %d/100 (%d findings)\n", ar.Agent, ar.Score, ar.FindingsCount))
+		}
+		b.WriteString("\n")
+	}
 
 	if len(r.Findings) > 0 {
 		b.WriteString("### Findings\n\n")
@@ -167,20 +204,20 @@ func buildDetailedPRComment(r *models.ReviewResult) string {
 
 	if len(r.Strengths) > 0 {
 		b.WriteString("### Strengths\n\n")
-		for _, s := range r.Strengths {
-			b.WriteString(fmt.Sprintf("- ✅ %s\n", s))
+		for _, item := range r.Strengths {
+			b.WriteString(fmt.Sprintf("- ✅ %s\n", item))
 		}
 		b.WriteString("\n")
 	}
 
 	if len(r.Suggestions) > 0 {
 		b.WriteString("### Suggestions\n\n")
-		for _, s := range r.Suggestions {
-			b.WriteString(fmt.Sprintf("- %s\n", s))
+		for _, item := range r.Suggestions {
+			b.WriteString(fmt.Sprintf("- %s\n", item))
 		}
 		b.WriteString("\n")
 	}
 
-	b.WriteString("_Generated by Code Review Agent_\n")
+	b.WriteString("_Generated by Multi-Agent Code Review Agent_\n")
 	return b.String()
 }

@@ -20,6 +20,11 @@ type Config struct {
 	GitHubToken         string
 	GitHubWebhookSecret string
 	GitHubPostComments  bool
+	RedisAddr           string
+	GosecPath           string
+	SemgrepPath         string
+	MaxChunkBytes       int
+	MaxRepoFiles        int
 }
 
 func Load() (*Config, error) {
@@ -41,6 +46,11 @@ func Load() (*Config, error) {
 		GitHubToken:         os.Getenv("GITHUB_TOKEN"),
 		GitHubWebhookSecret: os.Getenv("GITHUB_WEBHOOK_SECRET"),
 		GitHubPostComments:  getEnvBool("GITHUB_POST_COMMENTS", true),
+		RedisAddr:           getEnv("REDIS_ADDR", ""),
+		GosecPath:           getEnv("GOSEC_PATH", "gosec"),
+		SemgrepPath:         getEnv("SEMGREP_PATH", "semgrep"),
+		MaxChunkBytes:       getEnvInt("MAX_CHUNK_BYTES", 50000),
+		MaxRepoFiles:        getEnvInt("MAX_REPO_FILES", 20),
 	}, nil
 }
 
@@ -72,4 +82,16 @@ func getEnvBool(key string, fallback bool) bool {
 		return fallback
 	}
 	return b
+}
+
+func getEnvInt(key string, fallback int) int {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return fallback
+	}
+	return n
 }
