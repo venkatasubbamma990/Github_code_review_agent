@@ -1,10 +1,13 @@
 package main
 
 import (
+	"context"
+
 	"codereviewagent/internal/config"
 	ghclient "codereviewagent/internal/github"
 	"codereviewagent/internal/handler"
 	"codereviewagent/internal/logger"
+	"codereviewagent/internal/queue"
 	"codereviewagent/internal/reviewer"
 	"codereviewagent/internal/server"
 	"codereviewagent/internal/service"
@@ -29,13 +32,40 @@ func main() {
 		zap.String("port", cfg.Port),
 		zap.String("llm_provider", cfg.LLMProvider),
 		zap.String("llm_model", cfg.LLMModel),
-		zap.String("log_level", cfg.LogLevel),
+		zap.String("mode", "multi-agent"),
+		zap.String("redis", cfg.RedisAddr),
 	)
 
-	llmReviewer := reviewer.NewLLMReviewer(cfg.LLMAPIKey, cfg.LLMBaseURL, cfg.LLMModel, cfg.LLMJSONMode, log)
+	multiAgentReviewer := reviewer.NewMultiAgentReviewer(
+		cfg.LLMAPIKey, cfg.LLMBaseURL, cfg.LLMModel, cfg.LLMJSONMode,
+		cfg.MaxChunkBytes, cfg.GosecPath, cfg.SemgrepPath, log,
+	)
 	gh := ghclient.NewClient(cfg.GitHubToken, log)
-	reviewSvc := service.NewReviewService(llmReviewer, gh, cfg.GitHubPostComments, log)
+	q := queue.NewClient(cfg.RedisAddr, log)
+	defer func() { _ = q.Close() }()
+
+	reviewSvc := service.NewReviewService(multiAgentReviewer, gh, q, cfg.GitHubPostComments, cfg.MaxRepoFiles, log)
 	reviewHandler := handler.NewReviewHandler(reviewSvc, cfg.GitHubWebhookSecret, log)
+
+	if q.Enabled() {
+		worker := queue.NewWorker(cfg.RedisAddr, queue.TaskHandler{
+			OnPRReview: func(ctx context.Context, p queue.PRReviewPayload) ([]byte, error) {
+				return reviewSvc.ProcessPRReviewTask(ctx, p.Owner, p.Repo, p.PRNumber)
+			},
+			OnRepoReview: func(ctx context.Context, p queue.RepoReviewPayload) ([]byte, error) {
+				return reviewSvc.ProcessRepoReviewTask(ctx, p.Owner, p.Repo, p.Branch, p.MaxFiles)
+			},
+			Log: log,
+		}, log)
+		go func() {
+			if err := worker.Run(); err != nil {
+				log.Error("async worker stopped", zap.Error(err))
+			}
+		}()
+		log.Info("async worker started", zap.String("redis", cfg.RedisAddr))
+	} else {
+		log.Warn("redis not configured — webhooks run in-process goroutines")
+	}
 
 	srv := server.New(reviewHandler, cfg.GinMode, log)
 
