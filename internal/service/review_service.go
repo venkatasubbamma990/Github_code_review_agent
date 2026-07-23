@@ -69,12 +69,51 @@ func (s *ReviewService) ReviewPullRequest(ctx context.Context, owner, repo strin
 	}
 
 	if s.postComments {
-		comment := buildDetailedPRComment(result)
-		if postErr := s.github.PostReviewComment(ctx, owner, repo, prNumber, comment); postErr != nil {
+		if postErr := s.postPRReview(ctx, owner, repo, prNumber, files, result); postErr != nil {
 			return result, postErr
 		}
 	}
 	return result, nil
+}
+
+// postPRReview posts a GitHub pull request review with inline comments on
+// findings that map to diff lines, plus a summary body. Falls back to a plain
+// issue comment if the review API rejects the request.
+func (s *ReviewService) postPRReview(
+	ctx context.Context,
+	owner, repo string,
+	prNumber int,
+	files []ghclient.SourceFile,
+	result *models.ReviewResult,
+) error {
+	summary := buildDetailedPRComment(result)
+
+	patches := make(map[string]string, len(files))
+	for _, f := range files {
+		patches[f.Path] = f.Content
+	}
+	inline := ghclient.MapFindingsToInlineComments(result.Findings, patches)
+
+	sha, shaErr := s.github.GetPRHeadSHA(ctx, owner, repo, prNumber)
+	if shaErr != nil {
+		s.log.Warn("could not get PR head SHA; falling back to issue comment", zap.Error(shaErr))
+		return s.github.PostReviewComment(ctx, owner, repo, prNumber, summary)
+	}
+
+	if err := s.github.PostPullRequestReview(ctx, owner, repo, prNumber, sha, summary, inline); err != nil {
+		s.log.Warn("PR review with inline comments failed; falling back to issue comment",
+			zap.Int("inline_comments", len(inline)),
+			zap.Error(err),
+		)
+		return s.github.PostReviewComment(ctx, owner, repo, prNumber, summary)
+	}
+
+	s.log.Info("posted PR review",
+		zap.String("repo", owner+"/"+repo),
+		zap.Int("pr", prNumber),
+		zap.Int("inline_comments", len(inline)),
+	)
+	return nil
 }
 
 func (s *ReviewService) ReviewRepository(ctx context.Context, req models.RepoReviewRequest) (*models.ReviewResult, error) {
