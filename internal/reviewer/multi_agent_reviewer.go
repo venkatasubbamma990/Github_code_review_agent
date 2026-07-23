@@ -3,6 +3,7 @@ package reviewer
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"go.uber.org/zap"
 
@@ -73,12 +74,20 @@ func (r *MultiAgentReviewer) ReviewFiles(ctx context.Context, source string, rep
 		Source:       source,
 		RepoFullName: repoFullName,
 		Files:        toAgentFiles(files),
+		Diff:         buildCombinedDiff(files),
+	}
+	if prNumber := parsePRNumber(source); prNumber > 0 {
+		input.PRNumber = prNumber
 	}
 	if len(files) == 1 {
 		input.Language = files[0].Language
 		input.FilePath = files[0].Path
 	}
-	r.log.Info("reviewing files", zap.String("source", source), zap.Int("files", len(files)))
+	r.log.Info("reviewing files",
+		zap.String("source", source),
+		zap.Int("files", len(files)),
+		zap.Bool("has_diff", input.Diff != ""),
+	)
 	return r.orchestrator.RunReview(ctx, input)
 }
 
@@ -92,4 +101,32 @@ func toAgentFiles(files []ghclient.SourceFile) []agents.SourceFile {
 		}
 	}
 	return result
+}
+
+// buildCombinedDiff joins per-file patches so agents see both full files and the change set.
+func buildCombinedDiff(files []ghclient.SourceFile) string {
+	var b strings.Builder
+	for _, f := range files {
+		patch := f.Patch
+		if patch == "" {
+			continue
+		}
+		b.WriteString(fmt.Sprintf("--- %s\n", f.Path))
+		b.WriteString(patch)
+		if !strings.HasSuffix(patch, "\n") {
+			b.WriteString("\n")
+		}
+	}
+	return b.String()
+}
+
+func parsePRNumber(source string) int {
+	// source format: github:owner/repo#123
+	idx := strings.LastIndex(source, "#")
+	if idx < 0 || idx+1 >= len(source) {
+		return 0
+	}
+	var n int
+	_, _ = fmt.Sscanf(source[idx+1:], "%d", &n)
+	return n
 }

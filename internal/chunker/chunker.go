@@ -121,13 +121,17 @@ func ToReviewInput(base agents.ReviewInput, group []FileChunk, index, total int)
 		})
 	}
 
-	if base.Diff != "" {
+	// Diff-only reviews rebuild Diff from the chunk group. When full files are
+	// also present (PR reviews), keep the original combined patch diff.
+	if base.Diff != "" && len(base.Files) == 0 {
 		var b strings.Builder
 		for _, c := range group {
 			b.WriteString(c.Content)
 			b.WriteString("\n")
 		}
 		input.Diff = b.String()
+	} else if base.Diff != "" {
+		input.Diff = base.Diff
 	}
 
 	return input

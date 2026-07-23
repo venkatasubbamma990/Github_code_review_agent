@@ -58,7 +58,7 @@ func (s *ReviewService) ReviewPullRequest(ctx context.Context, owner, repo strin
 		return nil, errors.WithMessage(errors.ErrInternal, "GitHub token is not configured")
 	}
 
-	files, err := s.github.GetPRFileChunks(ctx, owner, repo, prNumber)
+	files, err := s.github.GetPRFileChunks(ctx, owner, repo, prNumber, s.maxRepoFiles)
 	if err != nil {
 		return nil, err
 	}
@@ -106,7 +106,11 @@ func (s *ReviewService) postPRReview(
 
 	patches := make(map[string]string, len(files))
 	for _, f := range files {
-		patches[f.Path] = f.Content
+		if f.Patch != "" {
+			patches[f.Path] = f.Patch
+		} else {
+			patches[f.Path] = f.Content
+		}
 	}
 	inline := ghclient.MapFindingsToInlineComments(result.Findings, patches)
 
@@ -219,10 +223,6 @@ func (s *ReviewService) GetJobStatus(jobID string) (*models.JobStatusResponse, e
 		CompletedAt:   status.CompletedAt,
 		LastFailedAt:  status.LastFailedAt,
 	}, nil
-}
-
-func (s *ReviewService) HandleWebhookPR(ctx context.Context, owner, repo string, prNumber int) (*models.ReviewResult, error) {
-	return s.ReviewPullRequest(ctx, owner, repo, prNumber)
 }
 
 func (s *ReviewService) ProcessPRReviewTask(ctx context.Context, owner, repo string, prNumber int) ([]byte, error) {

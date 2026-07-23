@@ -1,6 +1,6 @@
 # GitHub Code Review Agent
 
-An automated, multi-agent code review service that reviews pull requests, repositories, and code snippets — then posts structured feedback (summary + inline comments) back to GitHub.
+An automated, multi-agent code review service that reviews pull requests, repositories, and code snippets — then posts structured feedback (summary, inline comments, and Checks) back to GitHub.
 
 ---
 
@@ -14,7 +14,7 @@ Ship continuous, multi-dimensional code review without waiting on a human first 
 | **Cover more than style** | Security, quality, performance, style, and testing in parallel |
 | **Actionable feedback** | Scored findings with severity, file/line hints, and fix suggestions |
 | **Scale large diffs** | Chunk large changes and merge specialist reports into one review |
-| **Optional depth** | Enrich security with static analysis (gosec, semgrep) when available |
+| **Static analysis** | gosec + semgrep bundled in Docker and folded into the security agent |
 
 ---
 
@@ -26,7 +26,7 @@ The service runs **five specialist LLM agents** on each review, then an **aggreg
 GitHub Webhook / REST API
         │
         ▼
-   Review Service
+   Review Service  ── Redis/Asynq (webhooks + async jobs)
         │
         ▼
  Multi-Agent Orchestrator
@@ -40,7 +40,7 @@ Security  Quality  Performance  Style    Test
    Aggregator → scored review
         │
         ▼
- GitHub PR comment + inline notes (optional)
+ GitHub: PR review (inline) + Check Run / commit status
 ```
 
 **Review modes:**
@@ -48,80 +48,11 @@ Security  Quality  Performance  Style    Test
 | Mode | Trigger | What happens |
 |------|---------|--------------|
 | **Snippet** | `POST /api/v1/review` | Review pasted code |
-| **Pull request** | `POST /api/v1/review/pr` or GitHub webhook | Fetch PR patches, review, optionally post comments |
+| **Pull request** | `POST /api/v1/review/pr` or GitHub webhook | Fetch full files + patches, review, post comments/checks |
 | **Repository** | `POST /api/v1/review/repo` | Review selected repo files (sync or async) |
-| **Job status** | `GET /api/v1/review/jobs/:id` | Poll async repo/PR jobs (Redis required) |
+| **Job status** | `GET /api/v1/review/jobs/:id` | Poll async jobs (results retained 24h) |
 
-On PRs, the agent posts a **neutral COMMENT** review (does not approve or request changes): markdown summary plus up to **20 inline comments**, preferring critical/high severity.
-
----
-
-## What You Can Achieve
-
-- **Faster first-pass reviews** — every PR gets security, quality, performance, style, and test feedback automatically
-- **Consistent standards** — same checklist on every change, across languages
-- **Fewer missed security issues** — LLM review plus optional gosec/semgrep findings
-- **Clear priorities** — findings ranked by severity (`critical` → `info`) with scores for overall, maintainability, readability, security, and performance
-- **CI/CD integration** — webhook on `opened` / `synchronize` / `reopened`, or call the REST API from pipelines
-- **Async heavy work** — Redis + Asynq for long repo/PR jobs without blocking the HTTP request
-
----
-
-## Checks Covered
-
-### 1. Security Agent
-
-| Check area | Examples |
-|------------|----------|
-| OWASP Top 10 | Injection, XSS, CSRF, SSRF, insecure deserialization |
-| Secrets | Hardcoded API keys, passwords, tokens |
-| Auth | Authentication / authorization flaws |
-| Crypto | Weak or insecure cryptography |
-| Static tools | **gosec** (Go), **semgrep** (multi-language) when installed |
-
-Tool findings are treated as factual, prepended to the report, and can cap the security score when issues are found.
-
-### 2. Quality / Maintainability Agent
-
-- Complexity and readability  
-- Error handling and edge cases  
-- Coupling, cohesion, naming  
-- Function length and long-term maintainability  
-
-### 3. Performance Agent
-
-- Inefficient algorithms and hot loops  
-- Unnecessary allocations  
-- N+1 queries and blocking I/O  
-- Missing caching and scalability concerns  
-
-### 4. Style Agent
-
-- Formatting consistency  
-- Idiomatic language patterns  
-- Documentation quality  
-- Naming conventions and best practices  
-
-### 5. Test Agent
-
-- Missing unit / integration tests  
-- Weak assertions  
-- Untested edge cases  
-- Test anti-patterns  
-
-### Aggregator
-
-- Deduplicates overlapping findings (keeps highest severity)  
-- Builds a unified quality assessment  
-- Prioritizes and caps output at **20 findings**  
-
-**Finding severities:** `critical` · `high` · `medium` · `low` · `info`
-
----
-
-## Supported Languages
-
-Go, Python, JavaScript/TypeScript/TSX, Java, Rust, Ruby, PHP, C#, YAML, JSON, SQL, and Markdown. Common noise paths (vendor, `node_modules`, binaries, lockfiles) are skipped.
+On PRs, the agent posts a **COMMENT** review (does not approve or request changes): markdown summary plus up to **20 inline comments**, preferring critical/high severity. It also posts a **Check Run** (or commit-status fallback).
 
 ---
 
@@ -130,9 +61,10 @@ Go, Python, JavaScript/TypeScript/TSX, Java, Rust, Ruby, PHP, C#, YAML, JSON, SQ
 ```bash
 # 1. Configure
 cp .env.example .env
-# Edit .env — set LLM_API_KEY and GITHUB_TOKEN (and webhook secret if used)
+# Edit .env — set LLM_API_KEY and GITHUB_TOKEN
+# For webhooks: set GITHUB_WEBHOOK_SECRET and REDIS_ADDR
 
-# 2. Run with Docker (app + Redis)
+# 2. Run with Docker (app + Redis + gosec/semgrep)
 docker compose up --build
 
 # 3. Health check
@@ -144,6 +76,7 @@ Or with Make:
 ```bash
 make build   # build images
 make up      # start services
+make test    # unit tests
 make logs    # follow logs
 make down    # stop
 ```
@@ -153,11 +86,11 @@ make down    # stop
 | Variable | Purpose |
 |----------|---------|
 | `LLM_API_KEY` | Groq / OpenAI-compatible API key |
-| `GITHUB_TOKEN` | Fetch PRs/repos and post review comments |
-| `GITHUB_WEBHOOK_SECRET` | Verify GitHub webhook signatures |
-| `REDIS_ADDR` | Enable async queue (set by Compose to `redis:6379`) |
+| `GITHUB_TOKEN` | Fetch PRs/repos; post reviews and statuses |
+| `GITHUB_WEBHOOK_SECRET` | Verify webhook signatures (**requires Redis**) |
+| `REDIS_ADDR` | Async queue for webhooks and `async` repo reviews |
 
-See `.env.example` for the full list (LLM provider/model, comment posting, chunk/file limits, gosec/semgrep paths).
+Optional: `GITHUB_POST_COMMENTS`, `GITHUB_POST_CHECKS`, `GOSEC_PATH`, `SEMGREP_PATH`, `MAX_CHUNK_BYTES`, `MAX_REPO_FILES`. See `.env.example`.
 
 ---
 
@@ -168,9 +101,9 @@ See `.env.example` for the full list (LLM provider/model, comment posting, chunk
 | `GET` | `/health` | Liveness |
 | `POST` | `/api/v1/review` | Review code snippet |
 | `POST` | `/api/v1/review/pr` | Review a pull request |
-| `POST` | `/api/v1/review/repo` | Review a repository |
-| `GET` | `/api/v1/review/jobs/:id` | Async job status |
-| `POST` | `/api/v1/webhooks/github` | GitHub webhook receiver |
+| `POST` | `/api/v1/review/repo` | Review a repository (`async: true` to queue) |
+| `GET` | `/api/v1/review/jobs/:id` | Async job status + result |
+| `POST` | `/api/v1/webhooks/github` | GitHub webhook (`202` + `job_id`) |
 
 **Example — review a PR:**
 
@@ -180,48 +113,82 @@ curl -X POST http://localhost:8080/api/v1/review/pr \
   -d '{"owner":"ORG","repo":"REPO","pr":123}'
 ```
 
-**Example — review a snippet:**
+**Example — async repo review:**
 
 ```bash
-curl -X POST http://localhost:8080/api/v1/review \
+curl -X POST http://localhost:8080/api/v1/review/repo \
   -H "Content-Type: application/json" \
-  -d '{"code":"func main() {}","language":"go","file_path":"main.go"}'
+  -d '{"url":"https://github.com/ORG/REPO","async":true,"max_files":20}'
+
+# Poll
+curl http://localhost:8080/api/v1/review/jobs/<job_id>
 ```
 
 ### GitHub webhook setup
 
-1. Point the webhook URL to `https://<host>/api/v1/webhooks/github`
+1. URL: `https://<host>/api/v1/webhooks/github`
 2. Content type: `application/json`
-3. Secret: same value as `GITHUB_WEBHOOK_SECRET`
-4. Events: **Pull requests** (handles `opened`, `synchronize`, `reopened`)
+3. Secret: same as `GITHUB_WEBHOOK_SECRET`
+4. Events: **Pull requests** (`opened`, `synchronize`, `reopened`)
+5. Redis must be configured — duplicate deliveries for the same head SHA are deduplicated
 
 ---
 
-## Architecture (high level)
+## Checks Covered
+
+| Agent | Focus |
+|-------|--------|
+| **Security** | OWASP, secrets, auth, crypto + gosec/semgrep |
+| **Quality** | Complexity, errors, maintainability |
+| **Performance** | Hot loops, allocations, N+1, I/O |
+| **Style** | Idioms, naming, docs |
+| **Test** | Coverage gaps, weak assertions |
+| **Aggregator** | Dedupe, prioritize, cap at 20 findings |
+
+**Severities:** `critical` · `high` · `medium` · `low` · `info`
+
+**Check conclusions:** score / severity → `success` · `neutral` · `failure`
+
+---
+
+## Local development
+
+```bash
+make tidy
+make test
+make run     # needs .env; Redis for webhooks/async
+```
+
+CI runs `go vet`, `go test -race`, and `go build` on every push/PR (see `.github/workflows/ci.yml`).
+
+---
+
+## Architecture
 
 | Layer | Role |
 |-------|------|
 | `cmd/server` | Process entry and wiring |
 | `handler` | HTTP + webhook HMAC |
-| `service` | Review flows and PR comment posting |
-| `reviewer` | Multi-agent reviewer facade |
+| `service` | Review flows, inline comments, checks |
+| `reviewer` | Multi-agent facade |
 | `orchestrator` | Parallel agents + chunk merge |
 | `agents` | Security, Quality, Performance, Style, Test + Aggregator |
-| `tools` | Optional gosec / semgrep |
-| `github` | PR/repo fetch, diff line mapping, inline reviews |
-| `llm` | OpenAI-compatible chat client |
-| `queue` | Redis / Asynq background jobs |
-| `chunker` | Size-based batching and language detection |
+| `tools` | gosec / semgrep |
+| `github` | PR/repo fetch, diff mapping, reviews, checks |
+| `queue` | Redis / Asynq (24h retention, idempotent PR tasks) |
+| `chunker` | Size-based batching |
 
 **Stack:** Go · Gin · zap · go-github · Asynq/Redis · Groq or OpenAI-compatible LLM · Docker Compose
 
 ---
 
-## Project Status Notes
+## Project status
 
-- Production path uses the **multi-agent reviewer** (not the legacy single-LLM reviewer).
-- Static analysis tools are **optional**; they are skipped if not on `PATH` (not bundled in the default Docker image).
-- Without Redis, webhooks still work via an in-process background job and return `202`.
+- Multi-agent reviewer is the only production path
+- Docker image includes **gosec** and **semgrep**
+- Webhooks **require Redis** (no in-process fallback)
+- PR reviews use **full file content + patches** (capped by `MAX_REPO_FILES`)
+- Completed async jobs retained **24 hours** for status polling
 
 ---
 

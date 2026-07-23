@@ -13,11 +13,12 @@ import (
 	"codereviewagent/internal/errors"
 )
 
-// SourceFile is a file fetched from a GitHub repository.
+// SourceFile is a file fetched from a GitHub repository or pull request.
 type SourceFile struct {
 	Path     string
 	Language string
-	Content  string
+	Content  string // full file content when available; otherwise patch text
+	Patch    string // unified diff hunk for PR files (used for inline comments)
 }
 
 func (c *Client) GetRepositoryFiles(ctx context.Context, owner, repo, branch string, maxFiles int) ([]SourceFile, error) {
@@ -94,10 +95,19 @@ func (c *Client) GetRepositoryFiles(ctx context.Context, owner, repo, branch str
 	return files, nil
 }
 
-func (c *Client) GetPRFileChunks(ctx context.Context, owner, repo string, prNumber int) ([]SourceFile, error) {
+func (c *Client) GetPRFileChunks(ctx context.Context, owner, repo string, prNumber int, maxFiles int) ([]SourceFile, error) {
 	if !c.Enabled() {
 		return nil, errors.WithMessage(errors.ErrInternal, "GitHub client is not configured")
 	}
+	if maxFiles <= 0 {
+		maxFiles = 20
+	}
+
+	pr, _, err := c.gh.PullRequests.Get(ctx, owner, repo, prNumber)
+	if err != nil {
+		return nil, errors.WithCause(errors.ErrInternal, fmt.Errorf("get pull request: %w", err))
+	}
+	headSHA := pr.GetHead().GetSHA()
 
 	files, _, err := c.gh.PullRequests.ListFiles(ctx, owner, repo, prNumber, nil)
 	if err != nil {
@@ -106,19 +116,53 @@ func (c *Client) GetPRFileChunks(ctx context.Context, owner, repo string, prNumb
 
 	result := make([]SourceFile, 0, len(files))
 	for _, f := range files {
-		content := ""
-		if f.Patch != nil {
-			content = *f.Patch
-		}
-		if content == "" {
+		path := f.GetFilename()
+		if shouldSkipPath(path) || !chunker.IsReviewableExtension(path) {
 			continue
 		}
+
+		patch := ""
+		if f.Patch != nil {
+			patch = *f.Patch
+		}
+
+		status := f.GetStatus() // added | removed | modified | renamed | changed | copied
+		content := ""
+		if status != "removed" && headSHA != "" {
+			full, _, fetchErr := c.getFileContent(ctx, owner, repo, path, headSHA)
+			if fetchErr != nil {
+				c.log.Debug("full file fetch failed; using patch only",
+					zap.String("path", path),
+					zap.Error(fetchErr),
+				)
+			} else {
+				content = full
+			}
+		}
+		if content == "" {
+			content = patch
+		}
+		if content == "" && patch == "" {
+			continue
+		}
+
 		result = append(result, SourceFile{
-			Path:     f.GetFilename(),
-			Language: chunker.DetectLanguage(f.GetFilename()),
+			Path:     path,
+			Language: chunker.DetectLanguage(path),
 			Content:  content,
+			Patch:    patch,
 		})
+		if len(result) >= maxFiles {
+			break
+		}
 	}
+
+	c.log.Info("PR files prepared",
+		zap.String("repo", owner+"/"+repo),
+		zap.Int("pr", prNumber),
+		zap.Int("file_count", len(result)),
+		zap.String("head_sha", headSHA),
+	)
 	return result, nil
 }
 
