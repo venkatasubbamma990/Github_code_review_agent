@@ -15,12 +15,12 @@ import (
 )
 
 const aggregatorSystemPrompt = `You are the Aggregator Agent in a multi-agent code review system.
-You receive findings from specialist agents (security, quality, performance, style, test).
+You receive findings from specialist agents (security, bug, quality, performance, style, test).
 
 Your job:
 1. Merge and deduplicate findings (remove duplicates, keep the highest severity)
 2. Produce a unified quality assessment
-3. Prioritize the most important issues
+3. Prioritize the most important issues (prefer security and bug findings when severity ties)
 4. Return ONLY valid JSON matching this schema:
 {
   "quality": {
@@ -46,7 +46,8 @@ Your job:
   "suggestions": ["<top prioritized improvement suggestions>"]
 }
 
-Sort findings by severity (critical first). Limit to the 20 most important findings.`
+Sort findings by severity (critical first). Limit to the 20 most important findings.
+Weight correctness bugs and security issues heavily in the overall score.`
 
 type Aggregator struct {
 	client *llm.Client
@@ -145,15 +146,18 @@ func ruleBasedMerge(outputs []*AgentOutput) *mergedState {
 		scores:      map[string]int{},
 	}
 
-	seen := map[string]bool{}
+	seenIdx := map[string]int{}
 	for _, out := range outputs {
 		state.scores[string(out.Agent)] = out.Score
 		for _, f := range out.Findings {
-			key := strings.ToLower(f.Title + f.FilePath)
-			if seen[key] {
+			key := strings.ToLower(f.Title + "|" + f.FilePath)
+			if idx, ok := seenIdx[key]; ok {
+				if findingSeverityRank(f.Severity) < findingSeverityRank(state.findings[idx].Severity) {
+					state.findings[idx] = f
+				}
 				continue
 			}
-			seen[key] = true
+			seenIdx[key] = len(state.findings)
 			state.findings = append(state.findings, f)
 		}
 		for _, s := range out.Strengths {
@@ -166,13 +170,33 @@ func ruleBasedMerge(outputs []*AgentOutput) *mergedState {
 	return state
 }
 
+func findingSeverityRank(s models.Severity) int {
+	switch s {
+	case models.SeverityCritical:
+		return 0
+	case models.SeverityHigh:
+		return 1
+	case models.SeverityMedium:
+		return 2
+	case models.SeverityLow:
+		return 3
+	default:
+		return 4
+	}
+}
+
 func ruleBasedResult(input ReviewInput, merged *mergedState, outputs []*AgentOutput) *models.ReviewResult {
 	security := merged.scores[string(AgentSecurity)]
 	quality := merged.scores[string(AgentQuality)]
 	performance := merged.scores[string(AgentPerformance)]
 	style := merged.scores[string(AgentStyle)]
+	bug := merged.scores[string(AgentBug)]
 
 	overall := averageScore(merged.scores)
+	// Correctness bugs pull overall down when present.
+	if bug > 0 {
+		overall = averageOf(overall, bug)
+	}
 	maintainability := averageOf(quality, style)
 	readability := style
 	if readability == 0 {

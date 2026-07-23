@@ -13,6 +13,7 @@ type AgentName string
 const (
 	AgentContext     AgentName = "context"
 	AgentSecurity    AgentName = "security"
+	AgentBug         AgentName = "bug"
 	AgentQuality     AgentName = "quality"
 	AgentPerformance AgentName = "performance"
 	AgentStyle       AgentName = "style"

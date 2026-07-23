@@ -11,8 +11,12 @@ func NewQualityAgent(client *llm.Client, log *zap.Logger) Agent {
 	return newBaseAgent(
 		AgentQuality,
 		"maintainability",
-		`Evaluate code quality: complexity, readability, error handling, edge cases, coupling, cohesion,
-naming, function length, and long-term maintainability.`,
+		`Evaluate code quality and maintainability: complexity, readability, coupling, cohesion,
+naming clarity, function length, modularity, and long-term maintainability.
+
+Leave correctness/logic bugs to the Bug agent and security issues to the Security agent.
+You may note fragile error-handling patterns as maintainability concerns, but do not deep-dive
+into specific runtime bug hypotheses.`,
 		client,
 		log,
 	)
@@ -55,6 +59,7 @@ missing integration tests, and test anti-patterns.`,
 func NewDefaultAgents(client *llm.Client, toolRunner *tools.Runner, log *zap.Logger) []Agent {
 	return []Agent{
 		NewSecurityAgent(client, toolRunner, log),
+		NewBugDetectionAgent(client, log),
 		NewQualityAgent(client, log),
 		NewPerformanceAgent(client, log),
 		NewStyleAgent(client, log),
