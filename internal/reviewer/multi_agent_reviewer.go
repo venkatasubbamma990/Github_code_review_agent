@@ -29,6 +29,12 @@ func NewMultiAgentReviewer(
 ) *MultiAgentReviewer {
 	client := llm.NewClient(apiKey, baseURL, model, useJSONMode, log)
 	toolRunner := tools.NewRunner(gosecPath, semgrepPath, log)
+	log.Info("static analysis tools",
+		zap.String("gosec_path", gosecPath),
+		zap.Bool("gosec_available", toolRunner.GosecAvailable()),
+		zap.String("semgrep_path", semgrepPath),
+		zap.Bool("semgrep_available", toolRunner.SemgrepAvailable()),
+	)
 	agentList := agents.NewDefaultAgents(client, toolRunner, log)
 	aggregator := agents.NewAggregator(client, log)
 	orch := orchestrator.New(agentList, aggregator, maxChunkBytes, log)

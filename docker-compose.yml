@@ -20,6 +20,8 @@ services:
       GIN_MODE: release
       LOG_FORMAT: json
       REDIS_ADDR: redis:6379
+      GOSEC_PATH: gosec
+      SEMGREP_PATH: semgrep
     depends_on:
       - redis
     restart: unless-stopped
