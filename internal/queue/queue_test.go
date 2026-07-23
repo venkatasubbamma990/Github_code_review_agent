@@ -130,3 +130,24 @@ func TestEnqueueOptionsIncludeRetention(t *testing.T) {
 		t.Fatal("Retention option missing from enqueueOptions")
 	}
 }
+
+func TestPRReviewTaskID(t *testing.T) {
+	got := PRReviewTaskID("acme", "api", 42, "abc123")
+	want := "review:pr:acme/api#42@abc123"
+	if got != want {
+		t.Fatalf("got %q want %q", got, want)
+	}
+	if PRReviewTaskID("acme", "api", 42, "  ") != "review:pr:acme/api#42@unknown" {
+		t.Fatal("empty SHA should fall back to unknown")
+	}
+	// Same commit → same idempotency key
+	a := PRReviewTaskID("acme", "api", 1, "deadbeef")
+	b := PRReviewTaskID("acme", "api", 1, "deadbeef")
+	if a != b {
+		t.Fatal("identical inputs must produce identical task IDs")
+	}
+	// New push → different key
+	if PRReviewTaskID("acme", "api", 1, "cafebabe") == a {
+		t.Fatal("different SHAs must produce different task IDs")
+	}
+}

@@ -1,7 +1,6 @@
 package handler
 
 import (
-	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
@@ -115,7 +114,7 @@ func (h *ReviewHandler) ReviewRepo(c *gin.Context) {
 	)
 
 	if req.Async {
-		jobID, enqueueErr := h.svc.EnqueueRepoReview(owner, repo, req.Branch, req.MaxFiles)
+		result, enqueueErr := h.svc.EnqueueRepoReview(owner, repo, req.Branch, req.MaxFiles)
 		if enqueueErr != nil {
 			handleServiceError(c, h.log, enqueueErr)
 			return
@@ -123,7 +122,7 @@ func (h *ReviewHandler) ReviewRepo(c *gin.Context) {
 		c.JSON(http.StatusAccepted, models.APIResponse[models.ReviewJobAccepted]{
 			Success: true,
 			Data: models.ReviewJobAccepted{
-				JobID:   jobID,
+				JobID:   result.JobID,
 				Message: "repository review queued",
 				Repo:    owner + "/" + repo,
 			},
@@ -131,7 +130,7 @@ func (h *ReviewHandler) ReviewRepo(c *gin.Context) {
 		return
 	}
 
-	result, err := h.svc.ReviewRepository(c.Request.Context(), req)
+	reviewResult, err := h.svc.ReviewRepository(c.Request.Context(), req)
 	if err != nil {
 		handleServiceError(c, h.log, err)
 		return
@@ -139,7 +138,7 @@ func (h *ReviewHandler) ReviewRepo(c *gin.Context) {
 
 	c.JSON(http.StatusOK, models.APIResponse[models.ReviewResult]{
 		Success: true,
-		Data:    *result,
+		Data:    *reviewResult,
 	})
 }
 
@@ -206,46 +205,50 @@ func (h *ReviewHandler) GitHubWebhook(c *gin.Context) {
 	if prNumber == 0 {
 		prNumber = payload.Number
 	}
+	headSHA := payload.PullRequest.Head.SHA
 
-	h.log.Info("webhook PR review queued",
-		zap.String("action", action),
-		zap.String("repo", owner+"/"+repo),
-		zap.Int("pr", prNumber),
-	)
-
-	if jobID, err := h.svc.EnqueuePRReview(owner, repo, prNumber); err == nil {
-		c.JSON(http.StatusAccepted, gin.H{
-			"message": "review queued",
-			"job_id":  jobID,
-			"pr":      prNumber,
-			"repo":    owner + "/" + repo,
-		})
+	if owner == "" || repo == "" || prNumber <= 0 {
+		respondError(c, h.log, errors.WithMessage(errors.ErrInvalidRequest, "webhook payload missing repository or PR number"))
 		return
 	}
 
-	go func() {
-		ctx := context.Background()
-		result, reviewErr := h.svc.HandleWebhookPR(ctx, owner, repo, prNumber)
-		if reviewErr != nil {
-			h.log.Error("webhook PR review failed",
-				zap.String("repo", owner+"/"+repo),
-				zap.Int("pr", prNumber),
-				zap.Error(reviewErr),
-			)
-			return
-		}
-		h.log.Info("webhook PR review completed",
-			zap.String("review_id", result.ID),
+	if !h.svc.QueueEnabled() {
+		h.log.Error("webhook rejected: Redis queue is required",
 			zap.String("repo", owner+"/"+repo),
 			zap.Int("pr", prNumber),
-			zap.Int("overall_score", result.Quality.Overall),
 		)
-	}()
+		respondError(c, h.log, errors.WithMessage(errors.ErrServiceUnavailable,
+			"webhook processing requires Redis (set REDIS_ADDR)"))
+		return
+	}
 
-	c.JSON(http.StatusAccepted, gin.H{
-		"message": "review queued (in-process)",
-		"pr":      prNumber,
-		"repo":    owner + "/" + repo,
+	h.log.Info("webhook PR review enqueue",
+		zap.String("action", action),
+		zap.String("repo", owner+"/"+repo),
+		zap.Int("pr", prNumber),
+		zap.String("sha", headSHA),
+	)
+
+	enqueued, enqueueErr := h.svc.EnqueuePRReview(owner, repo, prNumber, headSHA)
+	if enqueueErr != nil {
+		handleServiceError(c, h.log, enqueueErr)
+		return
+	}
+
+	msg := "review queued"
+	if enqueued.Deduplicated {
+		msg = "review already queued for this commit"
+	}
+
+	c.JSON(http.StatusAccepted, models.APIResponse[models.ReviewJobAccepted]{
+		Success: true,
+		Data: models.ReviewJobAccepted{
+			JobID:        enqueued.JobID,
+			Message:      msg,
+			Repo:         owner + "/" + repo,
+			PR:           prNumber,
+			Deduplicated: enqueued.Deduplicated,
+		},
 	})
 }
 

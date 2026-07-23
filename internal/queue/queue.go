@@ -3,7 +3,9 @@ package queue
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/hibiken/asynq"
@@ -24,6 +26,13 @@ type PRReviewPayload struct {
 	Owner    string `json:"owner"`
 	Repo     string `json:"repo"`
 	PRNumber int    `json:"pr_number"`
+	HeadSHA  string `json:"head_sha,omitempty"`
+}
+
+// EnqueueResult is returned after attempting to enqueue a review job.
+type EnqueueResult struct {
+	JobID        string
+	Deduplicated bool
 }
 
 type RepoReviewPayload struct {
@@ -80,48 +89,76 @@ func (c *Client) Close() error {
 	return c.client.Close()
 }
 
-func enqueueOptions() []asynq.Option {
-	return []asynq.Option{
+func enqueueOptions(extra ...asynq.Option) []asynq.Option {
+	opts := []asynq.Option{
 		asynq.Queue(defaultQueue),
 		asynq.MaxRetry(defaultMaxRetry),
 		asynq.Timeout(defaultTimeout),
 		// Keep completed tasks (and their ResultWriter payload) queryable.
 		asynq.Retention(defaultRetention),
 	}
+	return append(opts, extra...)
 }
 
-func (c *Client) EnqueuePRReview(owner, repo string, prNumber int) (string, error) {
-	payload, err := json.Marshal(PRReviewPayload{Owner: owner, Repo: repo, PRNumber: prNumber})
-	if err != nil {
-		return "", err
+// PRReviewTaskID builds a stable idempotency key for a PR head SHA.
+// Duplicate webhook deliveries for the same commit reuse this task ID.
+func PRReviewTaskID(owner, repo string, prNumber int, headSHA string) string {
+	sha := strings.TrimSpace(headSHA)
+	if sha == "" {
+		sha = "unknown"
 	}
+	return fmt.Sprintf("review:pr:%s/%s#%d@%s", owner, repo, prNumber, sha)
+}
+
+func (c *Client) EnqueuePRReview(owner, repo string, prNumber int, headSHA string) (*EnqueueResult, error) {
+	payload, err := json.Marshal(PRReviewPayload{
+		Owner:    owner,
+		Repo:     repo,
+		PRNumber: prNumber,
+		HeadSHA:  headSHA,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	taskID := PRReviewTaskID(owner, repo, prNumber, headSHA)
 	task := asynq.NewTask(TaskReviewPR, payload)
-	info, err := c.client.Enqueue(task, enqueueOptions()...)
+	info, err := c.client.Enqueue(task, enqueueOptions(asynq.TaskID(taskID))...)
 	if err != nil {
-		return "", err
+		if errors.Is(err, asynq.ErrTaskIDConflict) {
+			c.log.Info("PR review already queued (idempotent)",
+				zap.String("task_id", taskID),
+				zap.String("repo", owner+"/"+repo),
+				zap.Int("pr", prNumber),
+				zap.String("sha", headSHA),
+			)
+			return &EnqueueResult{JobID: taskID, Deduplicated: true}, nil
+		}
+		return nil, err
 	}
+
 	c.log.Info("PR review enqueued",
 		zap.String("task_id", info.ID),
 		zap.Duration("retention", defaultRetention),
 	)
-	return info.ID, nil
+	return &EnqueueResult{JobID: info.ID, Deduplicated: false}, nil
 }
 
-func (c *Client) EnqueueRepoReview(owner, repo, branch string, maxFiles int) (string, error) {
+func (c *Client) EnqueueRepoReview(owner, repo, branch string, maxFiles int) (*EnqueueResult, error) {
 	payload, err := json.Marshal(RepoReviewPayload{Owner: owner, Repo: repo, Branch: branch, MaxFiles: maxFiles})
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	task := asynq.NewTask(TaskReviewRepo, payload)
 	info, err := c.client.Enqueue(task, enqueueOptions()...)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	c.log.Info("repo review enqueued",
 		zap.String("task_id", info.ID),
 		zap.Duration("retention", defaultRetention),
 	)
-	return info.ID, nil
+	return &EnqueueResult{JobID: info.ID, Deduplicated: false}, nil
 }
 
 func (c *Client) GetJobStatus(taskID string) (*JobStatus, error) {

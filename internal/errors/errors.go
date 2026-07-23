@@ -37,11 +37,12 @@ func AsAppError(err error) (*AppError, bool) {
 }
 
 var (
-	ErrInvalidRequest = &AppError{Code: "INVALID_REQUEST", Message: "Invalid request", HTTPStatus: http.StatusBadRequest}
-	ErrUnauthorized   = &AppError{Code: "UNAUTHORIZED", Message: "Unauthorized", HTTPStatus: http.StatusUnauthorized}
-	ErrNotFound       = &AppError{Code: "NOT_FOUND", Message: "Resource not found", HTTPStatus: http.StatusNotFound}
-	ErrInternal       = &AppError{Code: "INTERNAL", Message: "Internal server error", HTTPStatus: http.StatusInternalServerError}
-	ErrReviewFailed   = &AppError{Code: "REVIEW_FAILED", Message: "Code review failed", HTTPStatus: http.StatusBadGateway}
+	ErrInvalidRequest     = &AppError{Code: "INVALID_REQUEST", Message: "Invalid request", HTTPStatus: http.StatusBadRequest}
+	ErrUnauthorized       = &AppError{Code: "UNAUTHORIZED", Message: "Unauthorized", HTTPStatus: http.StatusUnauthorized}
+	ErrNotFound           = &AppError{Code: "NOT_FOUND", Message: "Resource not found", HTTPStatus: http.StatusNotFound}
+	ErrInternal           = &AppError{Code: "INTERNAL", Message: "Internal server error", HTTPStatus: http.StatusInternalServerError}
+	ErrReviewFailed       = &AppError{Code: "REVIEW_FAILED", Message: "Code review failed", HTTPStatus: http.StatusBadGateway}
+	ErrServiceUnavailable = &AppError{Code: "SERVICE_UNAVAILABLE", Message: "Service temporarily unavailable", HTTPStatus: http.StatusServiceUnavailable}
 )
 
 func WithMessage(base *AppError, msg string) *AppError {

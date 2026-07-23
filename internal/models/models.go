@@ -45,9 +45,11 @@ type JobStatusResponse struct {
 
 // ReviewJobAccepted is returned when a review is queued.
 type ReviewJobAccepted struct {
-	JobID   string `json:"job_id"`
-	Message string `json:"message"`
-	Repo    string `json:"repo,omitempty"`
+	JobID        string `json:"job_id"`
+	Message      string `json:"message"`
+	Repo         string `json:"repo,omitempty"`
+	PR           int    `json:"pr,omitempty"`
+	Deduplicated bool   `json:"deduplicated,omitempty"`
 }
 
 type Severity string

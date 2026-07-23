@@ -180,16 +180,20 @@ func (s *ReviewService) ReviewRepository(ctx context.Context, req models.RepoRev
 	return s.reviewer.ReviewFiles(ctx, source, repoFullName, files)
 }
 
-func (s *ReviewService) EnqueuePRReview(owner, repo string, prNumber int) (string, error) {
-	if s.queue == nil || !s.queue.Enabled() {
-		return "", errors.WithMessage(errors.ErrInternal, "async queue is not enabled (set REDIS_ADDR)")
-	}
-	return s.queue.EnqueuePRReview(owner, repo, prNumber)
+func (s *ReviewService) QueueEnabled() bool {
+	return s.queue != nil && s.queue.Enabled()
 }
 
-func (s *ReviewService) EnqueueRepoReview(owner, repo, branch string, maxFiles int) (string, error) {
-	if s.queue == nil || !s.queue.Enabled() {
-		return "", errors.WithMessage(errors.ErrInternal, "async queue is not enabled (set REDIS_ADDR)")
+func (s *ReviewService) EnqueuePRReview(owner, repo string, prNumber int, headSHA string) (*queue.EnqueueResult, error) {
+	if !s.QueueEnabled() {
+		return nil, errors.WithMessage(errors.ErrServiceUnavailable, "async queue is not enabled (set REDIS_ADDR)")
+	}
+	return s.queue.EnqueuePRReview(owner, repo, prNumber, headSHA)
+}
+
+func (s *ReviewService) EnqueueRepoReview(owner, repo, branch string, maxFiles int) (*queue.EnqueueResult, error) {
+	if !s.QueueEnabled() {
+		return nil, errors.WithMessage(errors.ErrServiceUnavailable, "async queue is not enabled (set REDIS_ADDR)")
 	}
 	return s.queue.EnqueueRepoReview(owner, repo, branch, maxFiles)
 }

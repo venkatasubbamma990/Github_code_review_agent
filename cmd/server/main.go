@@ -44,6 +44,10 @@ func main() {
 	q := queue.NewClient(cfg.RedisAddr, log)
 	defer func() { _ = q.Close() }()
 
+	if cfg.GitHubWebhookSecret != "" && !q.Enabled() {
+		log.Fatal("GITHUB_WEBHOOK_SECRET is set but REDIS_ADDR is empty — Redis is required for reliable webhook processing")
+	}
+
 	reviewSvc := service.NewReviewService(multiAgentReviewer, gh, q, cfg.GitHubPostComments, cfg.GitHubPostChecks, cfg.MaxRepoFiles, log)
 	reviewHandler := handler.NewReviewHandler(reviewSvc, cfg.GitHubWebhookSecret, log)
 
@@ -64,7 +68,7 @@ func main() {
 		}()
 		log.Info("async worker started", zap.String("redis", cfg.RedisAddr))
 	} else {
-		log.Warn("redis not configured — webhooks run in-process goroutines")
+		log.Warn("redis not configured — webhooks and async reviews will return 503 until REDIS_ADDR is set")
 	}
 
 	srv := server.New(reviewHandler, cfg.GinMode, log)
