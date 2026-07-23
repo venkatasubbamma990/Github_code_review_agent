@@ -11,7 +11,7 @@ Ship continuous, multi-dimensional code review without waiting on a human first 
 | Goal | Outcome |
 |------|---------|
 | **Automate PR review** | React to GitHub webhooks and review PRs as they open or update |
-| **Cover more than style** | Security, bug detection, quality, performance, style, and testing in parallel |
+| **Cover more than style** | Security, bugs, dependencies, quality, performance, style, and testing in parallel |
 | **Actionable feedback** | Scored findings with severity, file/line hints, and fix suggestions |
 | **Scale large diffs** | Chunk large changes and merge specialist reports into one review |
 | **Static analysis** | gosec + semgrep bundled in Docker and folded into the security agent |
@@ -33,7 +33,7 @@ GitHub Webhook / REST API
         │
    ┌────┴────┬─────────┬──────────┬────────┐
    ▼         ▼         ▼          ▼        ▼
-Security  Bug  Quality  Performance  Style  Test
+Security  Bug  Dependency  Quality  Performance  Style  Test
 (+ gosec/semgrep)
         │
         ▼
@@ -140,6 +140,7 @@ curl http://localhost:8080/api/v1/review/jobs/<job_id>
 |-------|--------|
 | **Security** | OWASP, secrets, auth, crypto + gosec/semgrep |
 | **Bug** | Logic bugs, nil deref, races, wrong error handling |
+| **Dependency** | Manifests, version pins, supply-chain / lockfile risk |
 | **Quality** | Complexity, coupling, maintainability |
 | **Performance** | Hot loops, allocations, N+1, I/O |
 | **Style** | Idioms, naming, docs |
@@ -173,7 +174,7 @@ CI runs `go vet`, `go test -race`, and `go build` on every push/PR (see `.github
 | `service` | Review flows, inline comments, checks |
 | `reviewer` | Multi-agent facade |
 | `orchestrator` | Parallel agents + chunk merge |
-| `agents` | Context, Security, Bug, Quality, Performance, Style, Test + Aggregator |
+| `agents` | Context, Security, Bug, Dependency, Quality, Performance, Style, Test + Aggregator |
 | `tools` | gosec / semgrep |
 | `github` | PR/repo fetch, diff mapping, reviews, checks |
 | `queue` | Redis / Asynq (24h retention, idempotent PR tasks) |

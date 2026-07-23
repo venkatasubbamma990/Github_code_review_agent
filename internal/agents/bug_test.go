@@ -25,7 +25,7 @@ func TestNewDefaultAgentsIncludesBug(t *testing.T) {
 	if !found {
 		t.Fatal("NewDefaultAgents should include Bug Detection Agent")
 	}
-	if len(agents) < 6 {
-		t.Fatalf("expected at least 6 specialists, got %d", len(agents))
+	if len(agents) < 7 {
+		t.Fatalf("expected at least 7 specialists, got %d", len(agents))
 	}
 }

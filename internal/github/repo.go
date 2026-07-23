@@ -187,6 +187,9 @@ func (c *Client) getFileContent(ctx context.Context, owner, repo, path, ref stri
 }
 
 func shouldSkipPath(path string) bool {
+	if chunker.IsDependencyManifest(path) {
+		return false
+	}
 	lower := strings.ToLower(path)
 	skipPrefixes := []string{
 		"vendor/", "node_modules/", ".git/", "dist/", "build/",

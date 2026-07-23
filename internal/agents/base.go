@@ -99,7 +99,8 @@ func buildUserPrompt(input ReviewInput) string {
 	if input.ContextBrief != "" {
 		b.WriteString(input.ContextBrief)
 		b.WriteString("\n")
-	} else if input.ExtraContext != "" {
+	}
+	if input.ExtraContext != "" {
 		b.WriteString(fmt.Sprintf("Additional context:\n%s\n\n", input.ExtraContext))
 	}
 

@@ -1,6 +1,7 @@
 package chunker
 
 import (
+	"path/filepath"
 	"strings"
 
 	"codereviewagent/internal/agents"
@@ -211,6 +212,29 @@ func DetectLanguage(path string) string {
 
 // IsReviewableExtension returns true for supported source file types.
 func IsReviewableExtension(path string) bool {
+	if IsDependencyManifest(path) {
+		return true
+	}
 	lang := DetectLanguage(path)
 	return lang != "text" || strings.HasSuffix(strings.ToLower(path), ".md")
 }
+
+// IsDependencyManifest reports whether path is a package/dependency manifest or lockfile.
+func IsDependencyManifest(path string) bool {
+	base := strings.ToLower(filepath.Base(filepath.ToSlash(path)))
+	switch base {
+	case "go.mod", "go.sum",
+		"package.json", "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "npm-shrinkwrap.json",
+		"requirements.txt", "pipfile", "pipfile.lock", "poetry.lock", "pyproject.toml",
+		"cargo.toml", "cargo.lock",
+		"gemfile", "gemfile.lock",
+		"composer.json", "composer.lock",
+		"pom.xml", "build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts":
+		return true
+	}
+	if strings.HasSuffix(base, ".csproj") || strings.HasSuffix(base, ".fsproj") {
+		return true
+	}
+	return false
+}
+

@@ -72,3 +72,29 @@ func TestFromSourceFiles(t *testing.T) {
 		t.Fatalf("unexpected chunks: %+v", chunks)
 	}
 }
+
+func TestIsDependencyManifest(t *testing.T) {
+	cases := map[string]bool{
+		"go.mod":              true,
+		"services/api/go.mod": true,
+		"package.json":        true,
+		"yarn.lock":           true,
+		"requirements.txt":    true,
+		"main.go":             false,
+		"readme.md":           false,
+	}
+	for path, want := range cases {
+		if got := IsDependencyManifest(path); got != want {
+			t.Errorf("IsDependencyManifest(%q)=%v want %v", path, got, want)
+		}
+	}
+}
+
+func TestIsReviewableExtensionIncludesManifests(t *testing.T) {
+	if !IsReviewableExtension("go.mod") {
+		t.Fatal("go.mod should be reviewable")
+	}
+	if !IsReviewableExtension("package.json") {
+		t.Fatal("package.json should be reviewable")
+	}
+}

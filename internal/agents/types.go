@@ -14,6 +14,7 @@ const (
 	AgentContext     AgentName = "context"
 	AgentSecurity    AgentName = "security"
 	AgentBug         AgentName = "bug"
+	AgentDependency  AgentName = "dependency"
 	AgentQuality     AgentName = "quality"
 	AgentPerformance AgentName = "performance"
 	AgentStyle       AgentName = "style"

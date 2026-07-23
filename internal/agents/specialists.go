@@ -60,6 +60,7 @@ func NewDefaultAgents(client *llm.Client, toolRunner *tools.Runner, log *zap.Log
 	return []Agent{
 		NewSecurityAgent(client, toolRunner, log),
 		NewBugDetectionAgent(client, log),
+		NewDependencyAgent(client, log),
 		NewQualityAgent(client, log),
 		NewPerformanceAgent(client, log),
 		NewStyleAgent(client, log),
