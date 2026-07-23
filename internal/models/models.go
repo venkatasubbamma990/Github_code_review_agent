@@ -30,11 +30,17 @@ type RepoReviewRequest struct {
 
 // JobStatusResponse represents async job status.
 type JobStatusResponse struct {
-	ID      string          `json:"id"`
-	Type    string          `json:"type"`
-	State   string          `json:"state"`
-	Result  json.RawMessage `json:"result,omitempty"`
-	Error   string          `json:"error,omitempty"`
+	ID            string          `json:"id"`
+	Type          string          `json:"type"`
+	State         string          `json:"state"`
+	Queue         string          `json:"queue,omitempty"`
+	Result        json.RawMessage `json:"result,omitempty"`
+	Error         string          `json:"error,omitempty"`
+	Retried       int             `json:"retried"`
+	MaxRetry      int             `json:"max_retry"`
+	NextProcessAt *time.Time      `json:"next_process_at,omitempty"`
+	CompletedAt   *time.Time      `json:"completed_at,omitempty"`
+	LastFailedAt  *time.Time      `json:"last_failed_at,omitempty"`
 }
 
 // ReviewJobAccepted is returned when a review is queued.

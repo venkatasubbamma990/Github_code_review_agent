@@ -13,6 +13,11 @@ import (
 const (
 	TaskReviewPR   = "review:pr"
 	TaskReviewRepo = "review:repo"
+
+	defaultQueue     = "default"
+	defaultMaxRetry  = 3
+	defaultTimeout   = 30 * time.Minute
+	defaultRetention = 24 * time.Hour
 )
 
 type PRReviewPayload struct {
@@ -28,13 +33,19 @@ type RepoReviewPayload struct {
 	MaxFiles int    `json:"max_files"`
 }
 
+// JobStatus is the inspectable status of an async review job.
 type JobStatus struct {
-	ID      string          `json:"id"`
-	Type    string          `json:"type"`
-	State   string          `json:"state"`
-	Result  json.RawMessage `json:"result,omitempty"`
-	Error   string          `json:"error,omitempty"`
-	Created time.Time       `json:"created"`
+	ID            string          `json:"id"`
+	Type          string          `json:"type"`
+	State         string          `json:"state"`
+	Queue         string          `json:"queue,omitempty"`
+	Result        json.RawMessage `json:"result,omitempty"`
+	Error         string          `json:"error,omitempty"`
+	Retried       int             `json:"retried"`
+	MaxRetry      int             `json:"max_retry"`
+	NextProcessAt *time.Time      `json:"next_process_at,omitempty"`
+	CompletedAt   *time.Time      `json:"completed_at,omitempty"`
+	LastFailedAt  *time.Time      `json:"last_failed_at,omitempty"`
 }
 
 type Client struct {
@@ -69,17 +80,30 @@ func (c *Client) Close() error {
 	return c.client.Close()
 }
 
+func enqueueOptions() []asynq.Option {
+	return []asynq.Option{
+		asynq.Queue(defaultQueue),
+		asynq.MaxRetry(defaultMaxRetry),
+		asynq.Timeout(defaultTimeout),
+		// Keep completed tasks (and their ResultWriter payload) queryable.
+		asynq.Retention(defaultRetention),
+	}
+}
+
 func (c *Client) EnqueuePRReview(owner, repo string, prNumber int) (string, error) {
 	payload, err := json.Marshal(PRReviewPayload{Owner: owner, Repo: repo, PRNumber: prNumber})
 	if err != nil {
 		return "", err
 	}
 	task := asynq.NewTask(TaskReviewPR, payload)
-	info, err := c.client.Enqueue(task, asynq.MaxRetry(3), asynq.Timeout(30*time.Minute))
+	info, err := c.client.Enqueue(task, enqueueOptions()...)
 	if err != nil {
 		return "", err
 	}
-	c.log.Info("PR review enqueued", zap.String("task_id", info.ID))
+	c.log.Info("PR review enqueued",
+		zap.String("task_id", info.ID),
+		zap.Duration("retention", defaultRetention),
+	)
 	return info.ID, nil
 }
 
@@ -89,11 +113,14 @@ func (c *Client) EnqueueRepoReview(owner, repo, branch string, maxFiles int) (st
 		return "", err
 	}
 	task := asynq.NewTask(TaskReviewRepo, payload)
-	info, err := c.client.Enqueue(task, asynq.MaxRetry(3), asynq.Timeout(30*time.Minute))
+	info, err := c.client.Enqueue(task, enqueueOptions()...)
 	if err != nil {
 		return "", err
 	}
-	c.log.Info("repo review enqueued", zap.String("task_id", info.ID))
+	c.log.Info("repo review enqueued",
+		zap.String("task_id", info.ID),
+		zap.Duration("retention", defaultRetention),
+	)
 	return info.ID, nil
 }
 
@@ -101,26 +128,69 @@ func (c *Client) GetJobStatus(taskID string) (*JobStatus, error) {
 	if !c.enabled {
 		return nil, fmt.Errorf("queue is not enabled")
 	}
+	if taskID == "" {
+		return nil, fmt.Errorf("task id is required")
+	}
 
-	info, err := c.inspector.GetTaskInfo("default", taskID)
+	info, err := c.inspector.GetTaskInfo(defaultQueue, taskID)
 	if err != nil {
 		return nil, err
 	}
+	return taskInfoToJobStatus(info), nil
+}
 
+func taskInfoToJobStatus(info *asynq.TaskInfo) *JobStatus {
 	status := &JobStatus{
-		ID:      info.ID,
-		Type:    info.Type,
-		State:   info.State.String(),
-		Created: info.NextProcessAt,
+		ID:       info.ID,
+		Type:     info.Type,
+		State:    normalizeJobState(info.State),
+		Queue:    info.Queue,
+		Retried:  info.Retried,
+		MaxRetry: info.MaxRetry,
 	}
 
-	if info.State == asynq.TaskStateCompleted && len(info.Result) > 0 {
-		status.Result = info.Result
+	if len(info.Result) > 0 {
+		status.Result = json.RawMessage(info.Result)
 	}
 	if info.LastErr != "" {
 		status.Error = info.LastErr
 	}
-	return status, nil
+	if !info.NextProcessAt.IsZero() {
+		t := info.NextProcessAt.UTC()
+		status.NextProcessAt = &t
+	}
+	if !info.CompletedAt.IsZero() {
+		t := info.CompletedAt.UTC()
+		status.CompletedAt = &t
+	}
+	if !info.LastFailedAt.IsZero() {
+		t := info.LastFailedAt.UTC()
+		status.LastFailedAt = &t
+	}
+	return status
+}
+
+// normalizeJobState maps asynq states to API-friendly values.
+// Archived tasks (exhausted retries) are exposed as "failed".
+func normalizeJobState(state asynq.TaskState) string {
+	switch state {
+	case asynq.TaskStatePending:
+		return "pending"
+	case asynq.TaskStateActive:
+		return "active"
+	case asynq.TaskStateScheduled:
+		return "scheduled"
+	case asynq.TaskStateRetry:
+		return "retry"
+	case asynq.TaskStateCompleted:
+		return "completed"
+	case asynq.TaskStateArchived:
+		return "failed"
+	case asynq.TaskStateAggregating:
+		return "aggregating"
+	default:
+		return state.String()
+	}
 }
 
 type Worker struct {
@@ -139,37 +209,62 @@ func NewWorker(redisAddr string, handler TaskHandler, log *zap.Logger) *Worker {
 	opt := asynq.RedisClientOpt{Addr: redisAddr}
 	srv := asynq.NewServer(opt, asynq.Config{
 		Concurrency: 3,
-		Queues:      map[string]int{"default": 10},
+		Queues:      map[string]int{defaultQueue: 10},
 	})
 
+	workerLog := log.Named("worker")
 	mux := asynq.NewServeMux()
 	mux.HandleFunc(TaskReviewPR, func(ctx context.Context, t *asynq.Task) error {
-		var p PRReviewPayload
-		if err := json.Unmarshal(t.Payload(), &p); err != nil {
-			return err
-		}
-		result, err := handler.OnPRReview(ctx, p)
-		if err != nil {
-			return err
-		}
-		_, writeErr := t.ResultWriter().Write(result)
-		return writeErr
+		return handleTask(ctx, t, workerLog, func(ctx context.Context) ([]byte, error) {
+			var p PRReviewPayload
+			if err := json.Unmarshal(t.Payload(), &p); err != nil {
+				return nil, fmt.Errorf("decode PR payload: %w", err)
+			}
+			return handler.OnPRReview(ctx, p)
+		})
 	})
 
 	mux.HandleFunc(TaskReviewRepo, func(ctx context.Context, t *asynq.Task) error {
-		var p RepoReviewPayload
-		if err := json.Unmarshal(t.Payload(), &p); err != nil {
-			return err
-		}
-		result, err := handler.OnRepoReview(ctx, p)
-		if err != nil {
-			return err
-		}
-		_, writeErr := t.ResultWriter().Write(result)
-		return writeErr
+		return handleTask(ctx, t, workerLog, func(ctx context.Context) ([]byte, error) {
+			var p RepoReviewPayload
+			if err := json.Unmarshal(t.Payload(), &p); err != nil {
+				return nil, fmt.Errorf("decode repo payload: %w", err)
+			}
+			return handler.OnRepoReview(ctx, p)
+		})
 	})
 
-	return &Worker{server: srv, mux: mux, log: log.Named("worker")}
+	return &Worker{server: srv, mux: mux, log: workerLog}
+}
+
+func handleTask(
+	ctx context.Context,
+	t *asynq.Task,
+	log *zap.Logger,
+	run func(context.Context) ([]byte, error),
+) error {
+	result, err := run(ctx)
+	if err != nil {
+		log.Error("task failed", zap.String("type", t.Type()), zap.Error(err))
+		return err
+	}
+
+	if len(result) == 0 {
+		result = []byte("{}")
+	}
+	if _, writeErr := t.ResultWriter().Write(result); writeErr != nil {
+		log.Error("failed to persist task result",
+			zap.String("type", t.Type()),
+			zap.Error(writeErr),
+		)
+		return fmt.Errorf("write task result: %w", writeErr)
+	}
+
+	log.Info("task completed",
+		zap.String("type", t.Type()),
+		zap.Int("result_bytes", len(result)),
+	)
+	return nil
 }
 
 func (w *Worker) Run() error {

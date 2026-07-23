@@ -203,11 +203,17 @@ func (s *ReviewService) GetJobStatus(jobID string) (*models.JobStatusResponse, e
 		return nil, errors.WithMessage(errors.ErrNotFound, "job not found")
 	}
 	return &models.JobStatusResponse{
-		ID:     status.ID,
-		Type:   status.Type,
-		State:  status.State,
-		Result: status.Result,
-		Error:  status.Error,
+		ID:            status.ID,
+		Type:          status.Type,
+		State:         status.State,
+		Queue:         status.Queue,
+		Result:        status.Result,
+		Error:         status.Error,
+		Retried:       status.Retried,
+		MaxRetry:      status.MaxRetry,
+		NextProcessAt: status.NextProcessAt,
+		CompletedAt:   status.CompletedAt,
+		LastFailedAt:  status.LastFailedAt,
 	}, nil
 }
 
