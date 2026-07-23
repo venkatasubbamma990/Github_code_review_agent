@@ -44,7 +44,7 @@ func main() {
 	q := queue.NewClient(cfg.RedisAddr, log)
 	defer func() { _ = q.Close() }()
 
-	reviewSvc := service.NewReviewService(multiAgentReviewer, gh, q, cfg.GitHubPostComments, cfg.MaxRepoFiles, log)
+	reviewSvc := service.NewReviewService(multiAgentReviewer, gh, q, cfg.GitHubPostComments, cfg.GitHubPostChecks, cfg.MaxRepoFiles, log)
 	reviewHandler := handler.NewReviewHandler(reviewSvc, cfg.GitHubWebhookSecret, log)
 
 	if q.Enabled() {

@@ -20,6 +20,7 @@ type Config struct {
 	GitHubToken         string
 	GitHubWebhookSecret string
 	GitHubPostComments  bool
+	GitHubPostChecks    bool
 	RedisAddr           string
 	GosecPath           string
 	SemgrepPath         string
@@ -46,6 +47,7 @@ func Load() (*Config, error) {
 		GitHubToken:         os.Getenv("GITHUB_TOKEN"),
 		GitHubWebhookSecret: os.Getenv("GITHUB_WEBHOOK_SECRET"),
 		GitHubPostComments:  getEnvBool("GITHUB_POST_COMMENTS", true),
+		GitHubPostChecks:    getEnvBool("GITHUB_POST_CHECKS", true),
 		RedisAddr:           getEnv("REDIS_ADDR", ""),
 		GosecPath:           getEnv("GOSEC_PATH", "gosec"),
 		SemgrepPath:         getEnv("SEMGREP_PATH", "semgrep"),

@@ -20,6 +20,7 @@ type ReviewService struct {
 	github       *ghclient.Client
 	queue        *queue.Client
 	postComments bool
+	postChecks   bool
 	maxRepoFiles int
 	log          *zap.Logger
 }
@@ -29,6 +30,7 @@ func NewReviewService(
 	gh *ghclient.Client,
 	q *queue.Client,
 	postComments bool,
+	postChecks bool,
 	maxRepoFiles int,
 	log *zap.Logger,
 ) *ReviewService {
@@ -37,6 +39,7 @@ func NewReviewService(
 		github:       gh,
 		queue:        q,
 		postComments: postComments,
+		postChecks:   postChecks,
 		maxRepoFiles: maxRepoFiles,
 		log:          log.Named("service"),
 	}
@@ -68,9 +71,21 @@ func (s *ReviewService) ReviewPullRequest(ctx context.Context, owner, repo strin
 		return nil, err
 	}
 
+	sha, shaErr := s.github.GetPRHeadSHA(ctx, owner, repo, prNumber)
+	if shaErr != nil {
+		s.log.Warn("could not resolve PR head SHA", zap.Error(shaErr))
+	}
+
 	if s.postComments {
-		if postErr := s.postPRReview(ctx, owner, repo, prNumber, files, result); postErr != nil {
+		if postErr := s.postPRReview(ctx, owner, repo, prNumber, files, result, sha); postErr != nil {
 			return result, postErr
+		}
+	}
+
+	if s.postChecks {
+		if checkErr := s.postPRCheck(ctx, owner, repo, prNumber, result, sha); checkErr != nil {
+			// Checks are best-effort: do not fail the review if posting status fails.
+			s.log.Warn("failed to post PR check/status", zap.Error(checkErr))
 		}
 	}
 	return result, nil
@@ -85,6 +100,7 @@ func (s *ReviewService) postPRReview(
 	prNumber int,
 	files []ghclient.SourceFile,
 	result *models.ReviewResult,
+	sha string,
 ) error {
 	summary := buildDetailedPRComment(result)
 
@@ -94,10 +110,13 @@ func (s *ReviewService) postPRReview(
 	}
 	inline := ghclient.MapFindingsToInlineComments(result.Findings, patches)
 
-	sha, shaErr := s.github.GetPRHeadSHA(ctx, owner, repo, prNumber)
-	if shaErr != nil {
-		s.log.Warn("could not get PR head SHA; falling back to issue comment", zap.Error(shaErr))
-		return s.github.PostReviewComment(ctx, owner, repo, prNumber, summary)
+	if sha == "" {
+		var shaErr error
+		sha, shaErr = s.github.GetPRHeadSHA(ctx, owner, repo, prNumber)
+		if shaErr != nil {
+			s.log.Warn("could not get PR head SHA; falling back to issue comment", zap.Error(shaErr))
+			return s.github.PostReviewComment(ctx, owner, repo, prNumber, summary)
+		}
 	}
 
 	if err := s.github.PostPullRequestReview(ctx, owner, repo, prNumber, sha, summary, inline); err != nil {
@@ -114,6 +133,23 @@ func (s *ReviewService) postPRReview(
 		zap.Int("inline_comments", len(inline)),
 	)
 	return nil
+}
+
+func (s *ReviewService) postPRCheck(
+	ctx context.Context,
+	owner, repo string,
+	prNumber int,
+	result *models.ReviewResult,
+	sha string,
+) error {
+	if sha == "" {
+		var err error
+		sha, err = s.github.GetPRHeadSHA(ctx, owner, repo, prNumber)
+		if err != nil {
+			return err
+		}
+	}
+	return s.github.PostReviewCheck(ctx, owner, repo, sha, result, prNumber)
 }
 
 func (s *ReviewService) ReviewRepository(ctx context.Context, req models.RepoReviewRequest) (*models.ReviewResult, error) {
