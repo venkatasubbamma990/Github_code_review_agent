@@ -13,19 +13,28 @@ import (
 	"codereviewagent/internal/models"
 )
 
-// Orchestrator runs specialist agents in parallel and aggregates their results.
+// Orchestrator runs the Context Agent as a pre-pass, then specialist agents in
+// parallel, and finally aggregates their results.
 type Orchestrator struct {
+	contextAgent  *agents.ContextAgent
 	agents        []agents.Agent
 	aggregator    *agents.Aggregator
 	maxChunkBytes int
 	log           *zap.Logger
 }
 
-func New(agentList []agents.Agent, aggregator *agents.Aggregator, maxChunkBytes int, log *zap.Logger) *Orchestrator {
+func New(
+	contextAgent *agents.ContextAgent,
+	agentList []agents.Agent,
+	aggregator *agents.Aggregator,
+	maxChunkBytes int,
+	log *zap.Logger,
+) *Orchestrator {
 	if maxChunkBytes <= 0 {
 		maxChunkBytes = 50000
 	}
 	return &Orchestrator{
+		contextAgent:  contextAgent,
 		agents:        agentList,
 		aggregator:    aggregator,
 		maxChunkBytes: maxChunkBytes,
@@ -34,6 +43,8 @@ func New(agentList []agents.Agent, aggregator *agents.Aggregator, maxChunkBytes 
 }
 
 func (o *Orchestrator) RunReview(ctx context.Context, input agents.ReviewInput) (*models.ReviewResult, error) {
+	input = o.enrichWithContext(ctx, input)
+
 	chunks := o.buildChunks(input)
 	groups := chunker.Group(chunks, o.maxChunkBytes)
 
@@ -42,6 +53,7 @@ func (o *Orchestrator) RunReview(ctx context.Context, input agents.ReviewInput) 
 		zap.Int("agent_count", len(o.agents)),
 		zap.Int("chunks", len(chunks)),
 		zap.Int("chunk_groups", len(groups)),
+		zap.Bool("has_context_brief", input.ContextBrief != ""),
 	)
 
 	if len(groups) <= 1 {
@@ -49,7 +61,11 @@ func (o *Orchestrator) RunReview(ctx context.Context, input agents.ReviewInput) 
 		if err != nil {
 			return nil, err
 		}
-		return o.aggregator.Aggregate(ctx, input, outputs)
+		result, err := o.aggregator.Aggregate(ctx, input, outputs)
+		if err != nil {
+			return nil, err
+		}
+		return attachContextReport(result, input), nil
 	}
 
 	var allOutputs []*agents.AgentOutput
@@ -68,7 +84,46 @@ func (o *Orchestrator) RunReview(ctx context.Context, input agents.ReviewInput) 
 	}
 
 	merged := agents.MergeOutputs(allOutputs)
-	return o.aggregator.Aggregate(ctx, input, merged)
+	result, err := o.aggregator.Aggregate(ctx, input, merged)
+	if err != nil {
+		return nil, err
+	}
+	return attachContextReport(result, input), nil
+}
+
+func (o *Orchestrator) enrichWithContext(ctx context.Context, input agents.ReviewInput) agents.ReviewInput {
+	if o.contextAgent == nil {
+		return input
+	}
+	// Skip when there is nothing for the context agent to work with.
+	if input.PRContext == "" && input.ExtraContext == "" && input.PRNumber == 0 && len(input.Files) == 0 {
+		return input
+	}
+
+	brief, err := o.contextAgent.BuildBrief(ctx, input)
+	if err != nil {
+		o.log.Warn("context agent failed; continuing without briefing", zap.Error(err))
+		return input
+	}
+	input.ContextBrief = agents.FormatBriefForAgents(brief)
+	return input
+}
+
+func attachContextReport(result *models.ReviewResult, input agents.ReviewInput) *models.ReviewResult {
+	if result == nil || input.ContextBrief == "" {
+		return result
+	}
+	summary := input.ContextBrief
+	if len(summary) > 300 {
+		summary = summary[:297] + "..."
+	}
+	result.AgentReports = append([]models.AgentReport{{
+		Agent:         string(agents.AgentContext),
+		Score:         100,
+		Summary:       summary,
+		FindingsCount: 0,
+	}}, result.AgentReports...)
+	return result
 }
 
 func (o *Orchestrator) buildChunks(input agents.ReviewInput) []chunker.FileChunk {

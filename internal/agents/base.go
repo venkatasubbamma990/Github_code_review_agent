@@ -96,6 +96,13 @@ func buildUserPrompt(input ReviewInput) string {
 		b.WriteString(fmt.Sprintf("Review chunk %d of %d.\n\n", input.ChunkIndex+1, input.TotalChunks))
 	}
 
+	if input.ContextBrief != "" {
+		b.WriteString(input.ContextBrief)
+		b.WriteString("\n")
+	} else if input.ExtraContext != "" {
+		b.WriteString(fmt.Sprintf("Additional context:\n%s\n\n", input.ExtraContext))
+	}
+
 	appendToolFindings(&b, input.ToolFindings)
 
 	if len(input.Files) > 0 {
@@ -107,6 +114,11 @@ func buildUserPrompt(input ReviewInput) string {
 			b.WriteString("\n")
 			b.WriteString(llm.Truncate(f.Content, 40000))
 			b.WriteString("\n```\n\n")
+		}
+		if input.Diff != "" {
+			b.WriteString("### Associated diff\n```diff\n")
+			b.WriteString(llm.Truncate(input.Diff, 20000))
+			b.WriteString("\n```\n")
 		}
 		return b.String()
 	}
@@ -132,9 +144,6 @@ Diff:
 		b.WriteString(fmt.Sprintf(" from file: %s", input.FilePath))
 	}
 	b.WriteString(".\n\n")
-	if input.ExtraContext != "" {
-		b.WriteString(fmt.Sprintf("Additional context: %s\n\n", input.ExtraContext))
-	}
 	b.WriteString("```")
 	b.WriteString(input.Language)
 	b.WriteString("\n")

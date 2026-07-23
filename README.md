@@ -48,7 +48,7 @@ Security  Quality  Performance  Style    Test
 | Mode | Trigger | What happens |
 |------|---------|--------------|
 | **Snippet** | `POST /api/v1/review` | Review pasted code |
-| **Pull request** | `POST /api/v1/review/pr` or GitHub webhook | Fetch full files + patches, review, post comments/checks |
+| **Pull request** | `POST /api/v1/review/pr` or GitHub webhook | Context Agent briefs specialists, then review + comments/checks |
 | **Repository** | `POST /api/v1/review/repo` | Review selected repo files (sync or async) |
 | **Job status** | `GET /api/v1/review/jobs/:id` | Poll async jobs (results retained 24h) |
 

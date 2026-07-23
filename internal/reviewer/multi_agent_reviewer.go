@@ -36,9 +36,10 @@ func NewMultiAgentReviewer(
 		zap.String("semgrep_path", semgrepPath),
 		zap.Bool("semgrep_available", toolRunner.SemgrepAvailable()),
 	)
+	contextAgent := agents.NewContextAgent(client, log)
 	agentList := agents.NewDefaultAgents(client, toolRunner, log)
 	aggregator := agents.NewAggregator(client, log)
-	orch := orchestrator.New(agentList, aggregator, maxChunkBytes, log)
+	orch := orchestrator.New(contextAgent, agentList, aggregator, maxChunkBytes, log)
 
 	return &MultiAgentReviewer{
 		orchestrator: orch,
@@ -70,11 +71,22 @@ func (r *MultiAgentReviewer) ReviewDiff(ctx context.Context, diff, repoFullName 
 }
 
 func (r *MultiAgentReviewer) ReviewFiles(ctx context.Context, source string, repoFullName string, files []ghclient.SourceFile) (*models.ReviewResult, error) {
+	return r.ReviewFilesWithContext(ctx, source, repoFullName, files, "")
+}
+
+// ReviewFilesWithContext reviews files with optional raw PR metadata for the Context Agent.
+func (r *MultiAgentReviewer) ReviewFilesWithContext(
+	ctx context.Context,
+	source, repoFullName string,
+	files []ghclient.SourceFile,
+	prContext string,
+) (*models.ReviewResult, error) {
 	input := agents.ReviewInput{
 		Source:       source,
 		RepoFullName: repoFullName,
 		Files:        toAgentFiles(files),
 		Diff:         buildCombinedDiff(files),
+		PRContext:    prContext,
 	}
 	if prNumber := parsePRNumber(source); prNumber > 0 {
 		input.PRNumber = prNumber
@@ -87,6 +99,7 @@ func (r *MultiAgentReviewer) ReviewFiles(ctx context.Context, source string, rep
 		zap.String("source", source),
 		zap.Int("files", len(files)),
 		zap.Bool("has_diff", input.Diff != ""),
+		zap.Bool("has_pr_context", prContext != ""),
 	)
 	return r.orchestrator.RunReview(ctx, input)
 }
@@ -121,7 +134,6 @@ func buildCombinedDiff(files []ghclient.SourceFile) string {
 }
 
 func parsePRNumber(source string) int {
-	// source format: github:owner/repo#123
 	idx := strings.LastIndex(source, "#")
 	if idx < 0 || idx+1 >= len(source) {
 		return 0

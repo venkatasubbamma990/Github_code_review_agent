@@ -11,6 +11,7 @@ import (
 type AgentName string
 
 const (
+	AgentContext     AgentName = "context"
 	AgentSecurity    AgentName = "security"
 	AgentQuality     AgentName = "quality"
 	AgentPerformance AgentName = "performance"
@@ -32,6 +33,10 @@ type ReviewInput struct {
 	Language     string
 	FilePath     string
 	ExtraContext string
+	// PRContext is raw GitHub PR metadata (title, body, labels, comments).
+	PRContext string
+	// ContextBrief is the Context Agent output injected for specialists.
+	ContextBrief string
 	Source       string
 	Diff         string
 	RepoFullName string

@@ -66,7 +66,20 @@ func (s *ReviewService) ReviewPullRequest(ctx context.Context, owner, repo strin
 		return nil, errors.WithMessage(errors.ErrInvalidRequest, "pull request has no reviewable changes")
 	}
 
-	result, err := s.reviewer.ReviewFiles(ctx, fmt.Sprintf("github:%s#%d", repoFullName, prNumber), repoFullName, files)
+	prContext := ""
+	if ctxBundle, ctxErr := s.github.GetPRContext(ctx, owner, repo, prNumber); ctxErr != nil {
+		s.log.Warn("failed to load PR context; continuing without it", zap.Error(ctxErr))
+	} else if ctxBundle != nil {
+		prContext = ctxBundle.FormatRaw()
+	}
+
+	result, err := s.reviewer.ReviewFilesWithContext(
+		ctx,
+		fmt.Sprintf("github:%s#%d", repoFullName, prNumber),
+		repoFullName,
+		files,
+		prContext,
+	)
 	if err != nil {
 		return nil, err
 	}
